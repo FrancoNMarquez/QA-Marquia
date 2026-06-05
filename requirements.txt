@@ -1,4 +1,5 @@
 streamlit>=1.40
+streamlit-option-menu>=0.4
 playwright==1.60.0
 anthropic>=0.105
 python-dotenv>=1.0
