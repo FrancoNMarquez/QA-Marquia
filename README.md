@@ -67,6 +67,29 @@ Después abrí 👉 **http://localhost:8501**
 - **Claude Code (suscripción)** → además necesita el CLI `claude` instalado y logueado. Existe
   para Windows, macOS y Linux, pero es un paso de instalación extra por persona.
 
+## 🐳 Docker (alternativa a instalar Python/Playwright)
+
+Si preferís no instalar nada (ni Python ni el navegador), corré la app en un contenedor.
+La imagen base ya trae chromium y todas las libs del sistema.
+
+```bash
+cd webchat-qa
+docker compose up --build        # construye y levanta -> http://localhost:8501
+# las próximas veces:
+docker compose up                # (o  -d  para segundo plano)
+docker compose down              # frena (los datos en runs/ y empresas/ persisten)
+```
+
+- **API key**: pasala con `ANTHROPIC_API_KEY=sk-ant-... docker compose up`, ponela en un
+  `.env` del host, o simplemente cargala en la barra lateral de la app.
+- **Datos**: `runs/` y `empresas/` se montan desde el host (bind mounts), así no se pierden
+  entre arranques ni al reconstruir la imagen.
+- **Motor de suscripción (Claude Code) en Docker**: por defecto la imagen soporta solo el
+  motor **API**. Para usar la suscripción, construí con el CLI horneado y montá tu sesión:
+  1. En `docker-compose.yml`, poné `INSTALL_CLAUDE_CLI: "true"` y descomentá el volumen
+     `${HOME}/.claude:/root/.claude`.
+  2. `docker compose up --build`.
+
 ## Correr (las próximas veces)
 
 ```bash

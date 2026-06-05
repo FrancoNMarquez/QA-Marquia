@@ -1,0 +1,26 @@
+# Espejo del .gitignore: lo que NO debe entrar al contexto de build ni a la imagen.
+
+# Entorno virtual (la imagen instala sus deps con pip; ~850 MB que no van).
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Secretos / config local (la key va por env o por la UI, nunca horneada en la imagen).
+.env
+
+# Datos locales por usuario (se montan como volúmenes, no se hornean).
+runs/
+empresas/
+
+# Git y artefactos de build de Docker.
+.git/
+.gitignore
+*.log
+Dockerfile
+.dockerignore
+docker-compose.yml

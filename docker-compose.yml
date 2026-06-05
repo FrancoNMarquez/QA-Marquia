@@ -1,0 +1,34 @@
+# Webchat QA — orquestación para correr la app en un contenedor.
+#
+#   docker compose up --build        # construye y levanta -> http://localhost:8501
+#   docker compose up -d             # en segundo plano
+#   docker compose down              # frena y borra el contenedor (los datos persisten)
+#
+# Los datos (runs/ y empresas/) viven en el host vía bind mounts, así no se
+# pierden entre arranques ni al reconstruir la imagen.
+
+services:
+  webchat-qa:
+    build:
+      context: .
+      args:
+        # Poné "true" para hornear el CLI de Claude Code (motor de suscripción).
+        # Si lo activás, descomentá también el montaje de ~/.claude más abajo.
+        INSTALL_CLAUDE_CLI: "false"
+    image: qa-marquia:latest
+    container_name: webchat-qa
+    ports:
+      - "8501:8501"
+    environment:
+      # Opcional: pasa la API key al contenedor (si no, se carga en la UI).
+      # Definila en tu shell o en un archivo .env del host (docker compose lo lee).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      # Persistencia de datos por usuario.
+      - ./runs:/app/runs
+      - ./empresas:/app/empresas
+      # --- Motor de suscripción (Claude Code) ---
+      # Descomentá para usar tu sesión de Claude Code dentro del contenedor.
+      # Requiere construir con INSTALL_CLAUDE_CLI=true.
+      # - ${HOME}/.claude:/root/.claude
+    restart: unless-stopped

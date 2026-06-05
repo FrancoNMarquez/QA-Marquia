@@ -54,18 +54,18 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
 > **(A) correr en un servidor compartido** (apunta a Docker) vs **(B) instalable local por
 > usuario** (apunta a empaquetado de escritorio). Hoy el diseño es B (local por usuario).
 
-### Dockerizar el proyecto
-- Empaquetar la app en un contenedor para no depender del entorno (adiós al lío de
-  `python3-venv` no disponible; en Docker se usa `pip` normal).
-- **Playwright**: usar la imagen base `mcr.microsoft.com/playwright/python` (trae chromium +
-  libs del sistema), o instalar `playwright install --with-deps chromium` en el build.
-- **Ojo con el motor Claude Code (Agent SDK)**: necesita el binario `claude` instalado y
-  *logueado* (credenciales en `~/.claude`). En un contenedor eso implica montar `~/.claude`
-  como volumen o, más simple, en la imagen soportar **solo el motor API** (key por env/UI) y
-  dejar el motor de suscripción para el uso local.
-- Entregables: `Dockerfile`, `.dockerignore` (espejo del `.gitignore`: sin `venv/`, `runs/`,
-  `empresas/`), `docker-compose.yml` exponiendo el `8501` y montando `runs/`+`empresas/` como
-  volúmenes para persistir datos entre arranques.
+### ~~Dockerizar el proyecto~~ — HECHO
+- `Dockerfile` sobre `mcr.microsoft.com/playwright/python:v1.60.0-noble` (chromium + libs +
+  Node ya incluidos; no hace falta `playwright install`). Deps con `pip install -r`,
+  Streamlit en `0.0.0.0:8501` (env `STREAMLIT_SERVER_*`), `HEALTHCHECK` contra
+  `/_stcore/health`, `CMD streamlit run app.py`.
+- **Motor de suscripción (Claude Code)**: por defecto la imagen soporta **solo el motor API**.
+  El CLI `claude` se hornea sólo con `--build-arg INSTALL_CLAUDE_CLI=true` (npm global) y hay
+  que montar `~/.claude` como volumen (descomentar en compose).
+- `docker-compose.yml`: expone `8501`, bind mounts de `runs/` y `empresas/` (persisten datos),
+  `ANTHROPIC_API_KEY` opcional por env, montaje de `~/.claude` comentado.
+- `.dockerignore` espejo del `.gitignore` (sin `venv/`, `runs/`, `empresas/`, `.env`, `.git/`).
+- ⚠️ Pendiente de validar el build en una máquina con Docker (no estaba instalado donde se creó).
 
 ### Evaluar frameworks de UI (mejorar la experiencia)
 - Streamlit es rápido para prototipar pero su modelo de *rerun* pelea con runs en paralelo /
