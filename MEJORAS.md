@@ -48,6 +48,51 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
 
 ---
 
+## 🔵 Infra / Distribución (a futuro, sin priorizar)
+
+> Nota transversal: hay dos rumbos posibles y conviene decidir el objetivo primero —
+> **(A) correr en un servidor compartido** (apunta a Docker) vs **(B) instalable local por
+> usuario** (apunta a empaquetado de escritorio). Hoy el diseño es B (local por usuario).
+
+### Dockerizar el proyecto
+- Empaquetar la app en un contenedor para no depender del entorno (adiós al lío de
+  `python3-venv` no disponible; en Docker se usa `pip` normal).
+- **Playwright**: usar la imagen base `mcr.microsoft.com/playwright/python` (trae chromium +
+  libs del sistema), o instalar `playwright install --with-deps chromium` en el build.
+- **Ojo con el motor Claude Code (Agent SDK)**: necesita el binario `claude` instalado y
+  *logueado* (credenciales en `~/.claude`). En un contenedor eso implica montar `~/.claude`
+  como volumen o, más simple, en la imagen soportar **solo el motor API** (key por env/UI) y
+  dejar el motor de suscripción para el uso local.
+- Entregables: `Dockerfile`, `.dockerignore` (espejo del `.gitignore`: sin `venv/`, `runs/`,
+  `empresas/`), `docker-compose.yml` exponiendo el `8501` y montando `runs/`+`empresas/` como
+  volúmenes para persistir datos entre arranques.
+
+### Evaluar frameworks de UI (mejorar la experiencia)
+- Streamlit es rápido para prototipar pero su modelo de *rerun* pelea con runs en paralelo /
+  updates en vivo (lo resolvimos con `st.fragment`, pero es un parche). Opciones a evaluar:
+  - **NiceGUI** (Python, FastAPI+Vue, websockets) — ideal para dashboards en tiempo real con
+    varios runs a la vez; además permite empaquetar como app de escritorio (ver abajo).
+  - **Reflex** (Python puro que compila a React) — app web "de verdad", más control de UI.
+  - **FastAPI + HTMX + TailwindCSS** — es el stack que ya usás en `web-python`; máximo control,
+    pero más laburo. Reutilizable el know-how.
+  - **Gradio** — muy rápido para lo conversacional, pero menos flexible para el resto.
+  - Alternativa mínima: quedarnos en Streamlit y solo pulir (theming, componentes custom).
+- Criterio: priorizar el que maneje bien **multi-run en vivo** sin hacks de rerun.
+
+### Hacer la app un instalable en la computadora
+- Objetivo: que un compañero la "instale" y la abra sin tocar la terminal.
+- Opciones (de menor a mayor esfuerzo):
+  1. **Entry-point + pipx**: agregar `pyproject.toml` con un script `qa-marquia` que levante
+     streamlit; se instala con `pipx install .` y se corre con un comando. Lo más simple.
+  2. **Launcher de escritorio**: un `.desktop` (Linux) / acceso directo que ejecute el venv +
+     streamlit y abra el navegador solo. Cero empaquetado, buena UX.
+  3. **App de escritorio nativa**: empaquetar como ejecutable (NiceGUI `native`/pywebview, o
+     Tauri/Electron apuntando a `localhost`). Es lo más "instalable" pero más pesado; **se
+     destraba casi gratis si migramos la UI a NiceGUI** (sinergia con el punto anterior).
+- Sinergia clave: **NiceGUI** cubre a la vez "mejor UI" (#2) y "instalable nativo" (#3).
+
+---
+
 ## Notas de implementación verificadas
 - Smoke test (runner falso, sin red/API): job→persistencia, 2 runs en paralelo (solapan),
   manejo de error del motor, y CRUD de perfiles → TODO OK.
