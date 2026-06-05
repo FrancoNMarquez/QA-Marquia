@@ -79,17 +79,22 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
   - Alternativa mínima: quedarnos en Streamlit y solo pulir (theming, componentes custom).
 - Criterio: priorizar el que maneje bien **multi-run en vivo** sin hacks de rerun.
 
-### Hacer la app un instalable en la computadora
-- Objetivo: que un compañero la "instale" y la abra sin tocar la terminal.
-- Opciones (de menor a mayor esfuerzo):
-  1. **Entry-point + pipx**: agregar `pyproject.toml` con un script `qa-marquia` que levante
-     streamlit; se instala con `pipx install .` y se corre con un comando. Lo más simple.
-  2. **Launcher de escritorio**: un `.desktop` (Linux) / acceso directo que ejecute el venv +
-     streamlit y abra el navegador solo. Cero empaquetado, buena UX.
-  3. **App de escritorio nativa**: empaquetar como ejecutable (NiceGUI `native`/pywebview, o
-     Tauri/Electron apuntando a `localhost`). Es lo más "instalable" pero más pesado; **se
-     destraba casi gratis si migramos la UI a NiceGUI** (sinergia con el punto anterior).
-- Sinergia clave: **NiceGUI** cubre a la vez "mejor UI" (#2) y "instalable nativo" (#3).
+### ~~Hacer la app un instalable en la computadora~~ — HECHO (launchers + acceso directo)
+- Objetivo cumplido: abrir la app **sin tocar la terminal**, sobre un repo clonado.
+- **Launchers de un solo paso** (idempotentes): `run.sh` (macOS/Linux) y `run.bat` (Windows).
+  Crean el venv si falta (con fallback `--without-pip` + bootstrap de pip en Linux), instalan
+  deps sólo si cambió `requirements.txt` (sentinela `venv/.deps_installed` con hash), aseguran
+  chromium, abren el navegador y levantan streamlit. `run.sh` verificado end-to-end (health=ok).
+- **Linux**: `instalar-acceso-directo.sh` genera `~/.local/share/applications/webchat-qa.desktop`
+  (con rutas absolutas) → "Webchat QA" en el menú de aplicaciones.
+- **Pendiente — pipx (`pyproject.toml` + `qa-marquia`)**: requiere refactor previo. Hoy
+  `app.py` ancla los datos en `BASE_DIR = Path(__file__).parent`, así que con `pipx install`
+  los `runs/` y `empresas/` caerían dentro de `site-packages`. Antes de empaquetar habría que
+  mover los datos a un dir de usuario (XDG: `~/.local/share/webchat-qa`) y cargar el
+  `.streamlit/config.toml` desde el paquete. Para el equipo (que clona el repo) los launchers
+  ya cubren el caso, así que pipx queda como mejora opcional.
+- **App nativa** (NiceGUI `native`/pywebview, Tauri/Electron): sigue a futuro; se destraba casi
+  gratis si se migra la UI a NiceGUI (sinergia con "Evaluar frameworks de UI").
 
 ---
 

@@ -14,7 +14,23 @@ Pensada para correr **local, por usuario**.
 - **API key de Anthropic** — pago por uso (~centavos por run). Cada uno pega su key en la UI.
   Útil si no querés depender del login de Claude Code o para tandas grandes.
 
-## Instalación
+## 🚀 Arranque rápido (sin terminal)
+
+La forma más fácil: un solo paso que crea el entorno, instala todo y abre la app en el
+navegador. Idempotente (las próximas veces arranca al toque). Requiere **Python 3.10+**.
+
+- **🪟 Windows** — doble-click en **`run.bat`**.
+- **🍎 macOS / 🐧 Linux** — doble-click en **`run.sh`** (o `./run.sh` en la terminal).
+
+### 🐧 Linux: acceso directo en el menú
+Para abrirla desde el menú de aplicaciones (sin ni siquiera entrar a la carpeta):
+```bash
+./instalar-acceso-directo.sh   # crea el lanzador "Webchat QA" en tu menú
+```
+
+> ¿Preferís instalarla a mano paso a paso? Seguí la sección de abajo.
+
+## Instalación (manual)
 
 > Funciona en **Windows, macOS y Linux** (no hace falta Linux). Requiere **Python 3.10+**.
 > Se crea un entorno virtual (`venv/`), se instalan las dependencias y el navegador de Playwright.
