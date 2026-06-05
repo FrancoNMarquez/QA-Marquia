@@ -1,0 +1,21 @@
+# Entorno virtual (regenerable; ~850 MB)
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Secretos / config local
+.env
+
+# Datos locales por usuario (no se comparten entre el equipo):
+# runs de QA (incluyen transcripciones reales de clientes) y workspaces de empresa
+# (config + perfiles, que pueden tener prompts/contexto de clientes).
+runs/
+empresas/
+
+# Binario de Playwright / navegadores si llegaran a quedar acá
+*.log

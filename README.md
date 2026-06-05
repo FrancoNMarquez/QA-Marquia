@@ -1,0 +1,75 @@
+# 🧪 Webchat QA
+
+App para testear **cualquier webchat** con un agente (Claude + Playwright). Le das el
+link del webchat y una tarea, el agente conversa solo, y obtenés un **reporte** + los
+**archivos que genera** (por ej. una versión corregida de un prompt). Cada run queda
+guardado.
+
+Pensada para correr **local, por usuario**.
+
+## Dos motores (toggle en la barra lateral)
+- **Claude Code (suscripción)** *(default)* — usa tu Claude Code logueado (Pro/Max), **sin
+  API key ni costo por uso**. Requiere tener `claude` instalado y logueado en la máquina.
+  Ideal para uso ocasional del equipo. (Usa el `claude-agent-sdk`.)
+- **API key de Anthropic** — pago por uso (~centavos por run). Cada uno pega su key en la UI.
+  Útil si no querés depender del login de Claude Code o para tandas grandes.
+
+## Setup
+
+`python3-venv` puede no estar disponible; creá el venv así:
+
+```bash
+cd webchat-qa
+python3 -m venv --without-pip venv
+curl -sS https://bootstrap.pypa.io/get-pip.py | venv/bin/python3
+venv/bin/pip install -r requirements.txt
+venv/bin/playwright install chromium
+```
+
+## Correr
+
+```bash
+venv/bin/streamlit run app.py      # abre http://localhost:8501
+```
+
+En la app:
+1. Elegí la **empresa** en la barra lateral (o creá una nueva con "➕ Nueva empresa"). Todo
+   queda separado por empresa: runs e historial van a `runs/<empresa>/`, y cada empresa
+   guarda sus **defaults** (link, tarea, selectores). No se mezclan clientes.
+2. Elegí el **motor** (Claude Code = sin API key; o pegá tu API key).
+3. Pegá el **link del webchat** y describí la **tarea** del agente. Con "💾 Guardar como
+   default de la empresa" se prefilla la próxima vez.
+4. (Opcional) Arrastrá archivos o pegá texto de **contexto** (el prompt actual, un banco
+   de preguntas, etc.) para que el agente lo tenga en cuenta y pueda sugerir correcciones.
+5. **Ejecutar Agente**. El run arranca en **background** (no bloquea): lo seguís en el panel
+   **🔴 Runs en curso** arriba, que se auto-refresca. Podés lanzar **varios runs en paralelo**.
+   Al terminar aparecen el reporte, los archivos (descargables) y un panel de **uso** (tokens,
+   turnos, costo, y —con Claude Code— el % de suscripción consumido).
+6. (Opcional) **💾 Guardar perfil** guarda el run actual (tarea + contexto + config) como un
+   **perfil** de la empresa. Después lo lanzás con 1 click desde "⭐ Perfiles guardados"
+   (varios a la vez = corren en paralelo).
+
+### Webchats que no auto-detecta
+La auto-detección de input/burbujas anda para la mayoría (Marquia viene pre-configurado).
+Si un webchat raro no funciona, usá **Avanzado → Inspeccionar selectores** y fijá a mano
+los selectores CSS del campo de texto y de las burbujas.
+
+## Estructura
+
+```
+app.py              UI Streamlit (selector de empresa, motores, panel de uso)
+engine/
+  chat_driver.py        wrapper de Playwright (auto-detección, streaming)
+  agent_runner.py       motor con API de Anthropic (generador de eventos)
+  agent_runner_sdk.py   motor con Claude Agent SDK (suscripción Claude Code), misma interfaz
+  jobs.py               gestor de runs en paralelo (cada run en un thread de fondo)
+  reporting.py          arma report.md / transcript.md + tarifas y panel de uso
+empresas/<empresa>/
+  config.json           defaults por empresa (url, tarea, selectores)
+  perfiles/<slug>.json  perfiles de QA guardados (se lanzan con 1 click)
+runs/<empresa>/     un subdirectorio por run (inputs, transcript, report, artefactos)
+```
+
+## Costos
+Usa la API de Anthropic (pago por uso). Un run típico de ~10 mensajes cuesta centavos.
+El modelo se elige en la barra lateral (default: Sonnet, buen equilibrio costo/calidad).

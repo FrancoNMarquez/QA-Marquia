@@ -1,0 +1,295 @@
+"""
+agent_runner_sdk.py — Motor alternativo que usa el **Claude Agent SDK**
+(la suscripción de Claude Code), sin API key.
+
+Expone la MISMA interfaz que engine.agent_runner.run_stream: un generador que
+emite eventos dict {"tipo": ...}. Así app.py elige el motor con un toggle sin
+cambiar el resto.
+
+Requisitos en la máquina del usuario:
+- Claude Code (`claude`) instalado y logueado (Pro/Max).
+- `pip install claude-agent-sdk`.
+
+Detalles técnicos:
+- El SDK es async. Playwright (sync) NO puede usarse en el loop asyncio, así que
+  el WebChatDriver vive en un THREAD DEDICADO y las tools async le hablan por una
+  cola (run_in_executor).
+- `can_use_tool` permite SOLO nuestras tools MCP (mcp__webqa__*) y deniega las
+  nativas de Claude Code (Bash, Write, etc.), para que el agente no toque la máquina.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import queue
+import shutil
+import threading
+from pathlib import Path
+
+from .agent_runner import CONTEXTO_HEADER, SYSTEM_BASE
+from .chat_driver import WebChatDriver
+
+SERVER = "webqa"
+NUESTRAS_TOOLS = [
+    f"mcp__{SERVER}__enviar_mensaje",
+    f"mcp__{SERVER}__generar_archivo",
+    f"mcp__{SERVER}__finalizar",
+]
+
+
+# ---- driver en thread dedicado (Playwright sync necesita un solo thread) ----
+class _DriverProxy:
+    def __init__(self, url, headless, selectors):
+        self._url, self._headless, self._sel = url, headless, selectors or {}
+        self._in: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._err = None
+        self._info = {}
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._t.start()
+        self._ready.wait(timeout=60)
+        if self._err:
+            raise RuntimeError(self._err)
+        return self._info
+
+    def _run(self):
+        try:
+            d = WebChatDriver(self._url, headless=self._headless, selectors=self._sel).start()
+        except Exception as e:  # noqa: BLE001
+            self._err = str(e)
+            self._ready.set()
+            return
+        self._info = {"input": d._input_selector, "message": d._msg_selector}
+        self._ready.set()
+        while True:
+            cmd = self._in.get()
+            if cmd is None:
+                break
+            op, arg, res = cmd
+            try:
+                if op == "send":
+                    d.send(arg)
+                    res.put(("ok", d.read_reply()))
+                elif op == "read":
+                    res.put(("ok", d.read_reply(timeout=arg)))
+                else:
+                    res.put(("ok", None))
+            except Exception as e:  # noqa: BLE001
+                res.put(("err", str(e)))
+        try:
+            d.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _call(self, op, arg=None):
+        res: queue.Queue = queue.Queue()
+        self._in.put((op, arg, res))
+        status, val = res.get()
+        if status == "err":
+            raise RuntimeError(val)
+        return val
+
+    def send(self, text):
+        return self._call("send", text)
+
+    def read_initial(self):
+        return self._call("read", 10)
+
+    def stop(self):
+        self._in.put(None)
+
+
+def _texto(reply):
+    return {"content": [{"type": "text", "text": str(reply)}]}
+
+
+async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selectors):
+    from claude_agent_sdk import (
+        AssistantMessage, ClaudeAgentOptions, PermissionResultAllow,
+        PermissionResultDeny, ResultMessage, TextBlock, create_sdk_mcp_server,
+        query, tool,
+    )
+    # RateLimitEvent puede no existir en versiones viejas del SDK; lo
+    # importamos de forma tolerante para no romper el motor.
+    try:
+        from claude_agent_sdk import RateLimitEvent
+    except Exception:  # noqa: BLE001
+        RateLimitEvent = None
+
+    loop = asyncio.get_event_loop()
+    reporte_holder = {}
+    # Acumuladores de uso para el panel (rellenados desde el ResultMessage /
+    # RateLimitEvent). Todo defensivo: si falla la lectura, quedan en None.
+    uso_evento = {
+        "tipo": "uso",
+        "tokens_in": None,
+        "tokens_out": None,
+        "turnos": None,
+        "duracion_s": None,
+        "costo_usd": None,
+        "suscripcion_pct": None,
+        "suscripcion_reset": None,
+    }
+
+    proxy = _DriverProxy(url, headless, selectors)
+    q.put({"tipo": "info", "texto": "Abriendo el webchat con Playwright..."})
+    info = await loop.run_in_executor(None, proxy.start)
+    q.put({"tipo": "info", "texto": f"Selectores → input: {info.get('input')} | "
+                                    f"mensajes: {info.get('message')}"})
+    saludo = await loop.run_in_executor(None, proxy.read_initial)
+    if saludo and saludo != "(sin respuesta dentro del timeout)":
+        q.put({"tipo": "saludo", "texto": saludo})
+        contexto_inicial = f'El webchat abrió con este mensaje:\n"{saludo}"'
+    else:
+        contexto_inicial = "El webchat no mostró un mensaje inicial."
+
+    # ---- tools MCP ----
+    @tool("enviar_mensaje", "Envía un mensaje al webchat objetivo y devuelve su respuesta.",
+          {"type": "object", "properties": {"mensaje": {"type": "string"}},
+           "required": ["mensaje"]})
+    async def enviar_mensaje(args):
+        msg = args["mensaje"]
+        q.put({"tipo": "tester", "texto": msg})
+        reply = await loop.run_in_executor(None, proxy.send, msg)
+        q.put({"tipo": "agente", "texto": reply})
+        return _texto(reply)
+
+    @tool("generar_archivo", "Devuelve un archivo de salida (reporte, prompt corregido, etc.).",
+          {"type": "object",
+           "properties": {"nombre": {"type": "string"}, "contenido": {"type": "string"}},
+           "required": ["nombre", "contenido"]})
+    async def generar_archivo(args):
+        q.put({"tipo": "archivo", "nombre": args.get("nombre", "archivo.txt"),
+               "contenido": args.get("contenido", "")})
+        return _texto(f"Archivo '{args.get('nombre')}' entregado al usuario.")
+
+    @tool("finalizar", "Terminá el QA con veredicto y hallazgos.",
+          {"type": "object", "properties": {
+              "veredicto": {"type": "string"}, "resumen": {"type": "string"},
+              "problemas": {"type": "array", "items": {"type": "string"}},
+              "aciertos": {"type": "array", "items": {"type": "string"}},
+              "sugerencias": {"type": "array", "items": {"type": "string"}}},
+           "required": ["veredicto", "resumen", "problemas", "aciertos", "sugerencias"]})
+    async def finalizar(args):
+        reporte_holder.update(args)
+        ev = {"tipo": "reporte"}
+        ev.update(args)
+        q.put(ev)
+        return _texto("Reporte recibido. Terminá el run sin usar más herramientas.")
+
+    server = create_sdk_mcp_server(SERVER, tools=[enviar_mensaje, generar_archivo, finalizar])
+
+    async def can_use_tool(name, _input, _ctx):
+        if name in NUESTRAS_TOOLS:
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="En este agente solo podés usar las tools de webqa.")
+
+    system = SYSTEM_BASE.format(tarea=(tarea or "(sin tarea)").strip())
+    if contexto:
+        system += CONTEXTO_HEADER + "".join(
+            f"\n===== {c['nombre']} =====\n{c['contenido']}\n" for c in contexto)
+    system += ("\n\nIMPORTANTE: usá ÚNICAMENTE las tools enviar_mensaje, generar_archivo y "
+               "finalizar. No intentes usar otras herramientas. Cerrá siempre con `finalizar`.")
+
+    cli = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+    options = ClaudeAgentOptions(
+        system_prompt=system,
+        mcp_servers={SERVER: server},
+        allowed_tools=NUESTRAS_TOOLS,
+        can_use_tool=can_use_tool,
+        max_turns=max_turnos * 3,   # cada intercambio usa varios turnos internos
+        model=modelo or None,
+        permission_mode="default",
+        setting_sources=[],          # no cargar CLAUDE.md / settings del proyecto
+        cli_path=cli,
+        cwd=str(Path(__file__).resolve().parent.parent),
+    )
+
+    prompt = (f"{contexto_inicial}\n\nEmpezá a trabajar en tu tarea. "
+              "Usá `enviar_mensaje` para hablarle al webchat y cerrá con `finalizar`.")
+
+    async def _prompt_stream():
+        # `can_use_tool` exige modo streaming: el prompt va como AsyncIterable.
+        yield {"type": "user", "message": {"role": "user", "content": prompt}}
+
+    try:
+        async for message in query(prompt=_prompt_stream(), options=options):
+            if isinstance(message, AssistantMessage):
+                txt = "".join(b.text for b in message.content
+                              if isinstance(b, TextBlock)).strip()
+                if txt:
+                    q.put({"tipo": "pensamiento", "texto": txt})
+            elif RateLimitEvent is not None and isinstance(message, RateLimitEvent):
+                # Info de suscripción (Pro/Max). Guardamos el más reciente.
+                try:
+                    info = message.rate_limit_info
+                    util = getattr(info, "utilization", None)
+                    if util is not None:
+                        uso_evento["suscripcion_pct"] = float(util) * 100
+                    resets = getattr(info, "resets_at", None)
+                    if resets is not None:
+                        # resets_at es un timestamp Unix; lo dejamos como string.
+                        uso_evento["suscripcion_reset"] = str(resets)
+                except Exception:  # noqa: BLE001
+                    pass
+            elif isinstance(message, ResultMessage):
+                # Leer campos de uso/costo del ResultMessage (defensivo).
+                try:
+                    usage = getattr(message, "usage", None) or {}
+                    ti = usage.get("input_tokens")
+                    ti = 0 if ti is None else ti
+                    ti += usage.get("cache_creation_input_tokens", 0) or 0
+                    ti += usage.get("cache_read_input_tokens", 0) or 0
+                    uso_evento["tokens_in"] = ti
+                    uso_evento["tokens_out"] = usage.get("output_tokens")
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    uso_evento["turnos"] = getattr(message, "num_turns", None)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    dur_ms = getattr(message, "duration_ms", None)
+                    if dur_ms is not None:
+                        uso_evento["duracion_s"] = dur_ms / 1000.0
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    uso_evento["costo_usd"] = getattr(message, "total_cost_usd", None)
+                except Exception:  # noqa: BLE001
+                    pass
+                break
+    finally:
+        await loop.run_in_executor(None, proxy.stop)
+        # Panel de uso — JUSTO ANTES de 'fin'. El 'fin' lo agrega el worker en
+        # su finally DESPUÉS de que asyncio.run(_amain(...)) retorna, así que
+        # este q.put llega antes. No rompemos el run si esto falla.
+        try:
+            q.put(uso_evento)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_stream(url, tarea, contexto=None, api_key=None, modelo=None,
+               max_turnos=12, headless=True, selectors=None, **_):
+    """Mismo contrato que agent_runner.run_stream, pero usando el Agent SDK
+    (suscripción de Claude Code). `api_key` se ignora a propósito."""
+    q: queue.Queue = queue.Queue()
+
+    def worker():
+        try:
+            asyncio.run(_amain(q, url, tarea, contexto or [], modelo,
+                               max_turnos, headless, selectors or {}))
+        except Exception as e:  # noqa: BLE001
+            q.put({"tipo": "error", "texto": f"Error en el motor SDK: {e}"})
+        finally:
+            q.put({"tipo": "fin"})
+
+    threading.Thread(target=worker, daemon=True).start()
+    while True:
+        ev = q.get()
+        yield ev
+        if ev.get("tipo") == "fin":
+            break
