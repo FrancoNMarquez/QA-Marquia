@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_option_menu import option_menu
 
 from engine import agent_runner as eng_api
 from engine import agent_runner_sdk as eng_sdk
@@ -48,7 +49,98 @@ EMPRESA_LEGACY_NOMBRE = "Pranzo Marketing"
 
 MODELOS = ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"]
 
-st.set_page_config(page_title="Webchat QA", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="Webchat QA", page_icon="🧪", layout="wide",
+                   initial_sidebar_state="expanded")
+
+# Paleta (índigo → violeta) reutilizada en CSS y badges.
+ACCENT = "#6366f1"
+ACCENT2 = "#8b5cf6"
+
+CSS = """
+<style>
+/* ---------- tipografía y base (tema oscuro) ---------- */
+html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
+.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
+
+/* ---------- hero ---------- */
+.hero {
+  background: linear-gradient(120deg, #6366f1 0%, #8b5cf6 55%, #a855f7 100%);
+  color: #fff; padding: 1.4rem 1.6rem; border-radius: 18px; margin-bottom: 1.2rem;
+  box-shadow: 0 12px 34px -14px rgba(99,102,241,.7);
+}
+.hero h1 { color:#fff; font-size: 1.7rem; font-weight: 800; margin: 0; letter-spacing:-.02em; }
+.hero p { color: rgba(255,255,255,.92); margin:.35rem 0 0; font-size: .95rem; }
+
+/* ---------- botones (fondo+texto fijos para que NUNCA queden ilegibles) ---------- */
+.stButton > button, .stDownloadButton > button {
+  border-radius: 10px; font-weight: 600; transition: all .15s ease; padding: .45rem 1rem;
+  background: #20242f !important; color: #e7e9f3 !important; border: 1px solid #313647 !important;
+}
+.stButton > button:hover, .stDownloadButton > button:hover {
+  transform: translateY(-1px); border-color: #5b63d6 !important;
+  background: #262b39 !important;
+  box-shadow: 0 6px 16px -8px rgba(99,102,241,.6);
+}
+/* botón primario con gradiente */
+.stButton > button[kind="primary"] {
+  background: linear-gradient(120deg, #6366f1, #8b5cf6) !important; border: none !important;
+  color:#fff !important;
+}
+.stButton > button[kind="primary"]:hover {
+  filter: brightness(1.08); box-shadow: 0 8px 22px -8px rgba(99,102,241,.8);
+}
+
+/* ---------- cards (contenedores con borde) ---------- */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius: 16px !important; border-color: #262b3a !important;
+  background: #171a24; box-shadow: 0 1px 2px rgba(0,0,0,.25);
+}
+
+/* ---------- inputs ---------- */
+[data-baseweb="input"] input, [data-baseweb="textarea"] textarea, .stTextInput input {
+  border-radius: 10px !important;
+}
+
+/* ---------- sidebar ---------- */
+[data-testid="stSidebar"] { background: #12141d; border-right: 1px solid #232838; }
+[data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
+.sb-brand { display:flex; align-items:center; gap:.55rem; font-weight:800; font-size:1.15rem;
+  color:#e7e9f3; margin-bottom:.2rem; }
+.sb-brand .dot { width:30px; height:30px; border-radius:9px;
+  background:linear-gradient(120deg,#6366f1,#8b5cf6); display:flex; align-items:center;
+  justify-content:center; font-size:1rem; box-shadow:0 4px 12px -4px rgba(99,102,241,.7);}
+
+/* ---------- metric / uso ---------- */
+[data-testid="stMetric"] {
+  background:#171a24; border:1px solid #262b3a; border-radius:12px; padding:.6rem .8rem;
+}
+[data-testid="stMetricValue"] { font-size:1.25rem; }
+
+/* ---------- expander ---------- */
+[data-testid="stExpander"] { border-radius:12px; border:1px solid #262b3a; }
+
+/* ---------- badges de estado (píldoras claras, legibles sobre oscuro) ---------- */
+.badge { display:inline-block; padding:.12rem .6rem; border-radius:999px; font-size:.74rem;
+  font-weight:700; letter-spacing:.02em; }
+.badge-run { background:#2a2f55; color:#aab2ff; }
+.badge-ok  { background:#163a2b; color:#5ee2a0; }
+.badge-warn{ background:#3d2f12; color:#fbd66a; }
+.badge-err { background:#3d1d1d; color:#ff9a90; }
+
+/* ---------- file uploader ---------- */
+[data-testid="stFileUploaderDropzone"] {
+  background:#171a24; border:1.5px dashed #313647; border-radius:12px;
+}
+
+/* ---------- headings de sección ---------- */
+h4 { font-weight: 800; letter-spacing:-.01em; margin-top:.4rem; }
+h5 { font-weight: 700; color:#c9cce0; }
+
+/* ---------- divisores más sutiles ---------- */
+hr { margin: .8rem 0; border-color:#232838; }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
 
 # ----------------------------- helpers -------------------------------------
@@ -324,16 +416,28 @@ def render_resultados(run):
 def render_job(s):
     """Pinta un job (snapshot) dentro de un contenedor (sin expanders, para no
     anidar)."""
-    estado_icon = {"corriendo": "⏳", "terminado": "✅", "error": "⛔"}[s["estado"]]
+    estado_badge = {
+        "corriendo": '<span class="badge badge-run">⏳ en curso</span>',
+        "terminado": '<span class="badge badge-ok">✓ terminado</span>',
+        "error": '<span class="badge badge-err">⛔ error</span>',
+    }[s["estado"]]
     dur = (s["finished"] or time.time()) - s["started"]
     m = s["meta"]
     rep = (s.get("saved") or {}).get("reporte") or s.get("reporte") or {}
     ver = rep.get("veredicto")
-    vericon = {"aprobado": "✅", "aprobado_con_observaciones": "⚠️",
-               "rechazado": "❌"}.get(ver, "")
+    ver_badge = {
+        "aprobado": '<span class="badge badge-ok">✅ aprobado</span>',
+        "aprobado_con_observaciones": '<span class="badge badge-warn">⚠️ con observaciones</span>',
+        "rechazado": '<span class="badge badge-err">❌ rechazado</span>',
+    }.get(ver, "")
     with st.container(border=True):
         titulo = (m.get("tarea") or m.get("url") or "run")[:60]
-        st.markdown(f"**{estado_icon} {titulo}**  ·  {dur:.0f}s {vericon}")
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">'
+            f'{estado_badge}{ver_badge}'
+            f'<span style="color:#9499ab;font-size:.8rem">· {dur:.0f}s</span></div>'
+            f'<div style="font-weight:700;margin:.4rem 0 .1rem">{titulo}</div>',
+            unsafe_allow_html=True)
         st.caption(f"{m.get('motor_label', '')} · {m.get('modelo', '')} · {m.get('url', '')}")
 
         if s["estado"] == "corriendo":
@@ -345,8 +449,6 @@ def render_job(s):
                 with st.container(height=200):
                     render_transcript_vivo(s["transcript"])
         else:  # terminado
-            if ver:
-                st.markdown(f"{vericon} **Veredicto:** {ver.replace('_', ' ')}")
             uso = (s.get("saved") or {}).get("uso") or s.get("uso")
             if uso:
                 render_uso(uso)
@@ -357,7 +459,7 @@ def render_job(s):
                     with cols[i % len(cols)]:
                         st.download_button(f"⬇️ {nombre}", data=contenido, file_name=nombre,
                                            key=f"job-dl-{s['id']}-{nombre}")
-            st.caption("Detalle completo en la pestaña 🗂️ Runs anteriores.")
+            st.caption("Detalle completo en la sección 🗂️ Runs anteriores.")
 
 
 @st.fragment(run_every=2)
@@ -379,7 +481,13 @@ def panel_jobs(empresa):
 
 # ----------------------------- sidebar -------------------------------------
 with st.sidebar:
-    st.header("🏢 Empresa")
+    st.markdown(
+        '<div class="sb-brand"><span class="dot">🧪</span> Webchat QA</div>',
+        unsafe_allow_html=True)
+    st.caption("Testeá webchats con un agente.")
+    st.divider()
+
+    st.markdown("##### 🏢 Empresa")
     empresas = listar_empresas()
     if st.session_state.get("empresa") not in empresas:
         st.session_state["empresa"] = empresas[0]
@@ -403,7 +511,7 @@ with st.sidebar:
                 st.warning("Poné un nombre.")
 
     st.divider()
-    st.header("⚙️ Configuración")
+    st.markdown("##### ⚙️ Configuración")
     motor = st.radio(
         "Motor",
         ["Claude Code (suscripción)", "API key de Anthropic"],
@@ -436,23 +544,37 @@ with st.sidebar:
 
 
 # ----------------------------- main ----------------------------------------
-st.title("🧪 Webchat QA")
-st.caption("Testeá cualquier webchat con un agente: dale el link, una tarea, y obtené "
-           "un reporte + archivos corregidos. Podés lanzar varios runs en paralelo.")
+st.markdown(
+    '<div class="hero"><h1>🧪 Webchat QA</h1>'
+    '<p>Testeá cualquier webchat con un agente: dale el link y una tarea, y obtené un '
+    'reporte + archivos corregidos. Podés lanzar varios runs en paralelo.</p></div>',
+    unsafe_allow_html=True)
 
-# Panel de runs en curso/recientes (arriba de los tabs para que el auto-refresh
-# no resetee la pestaña activa). Solo se muestra si hay jobs en esta sesión.
+# Panel de runs en curso/recientes (arriba del nav para que el auto-refresh no
+# interfiera con la sección activa). Solo se muestra si hay jobs en esta sesión.
 if jobs.listar(empresa):
     st.markdown("### 🔴 Runs en curso / recientes")
     panel_jobs(empresa)
     st.divider()
 
-tab_run, tab_hist = st.tabs(["▶️ Nuevo run", "🗂️ Runs anteriores"])
+seccion = option_menu(
+    None, ["Nuevo run", "Runs anteriores"],
+    icons=["play-circle-fill", "clock-history"], orientation="horizontal", key="nav",
+    styles={
+        "container": {"padding": "4px", "background-color": "#171a24",
+                      "border-radius": "12px", "border": "1px solid #262b3a"},
+        "nav-link": {"font-weight": "600", "border-radius": "9px", "margin": "0 3px",
+                     "color": "#c9cce0", "--hover-color": "#222634"},
+        "nav-link-selected": {"background": "linear-gradient(120deg,#6366f1,#8b5cf6)",
+                              "color": "#fff"},
+        "icon": {"font-size": "0.95rem", "color": "#aab2ff"},
+    })
 
-with tab_run:
+if seccion == "Nuevo run":
     cfg = cargar_config(empresa)
     st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
 
+    st.markdown("#### 📝 Definí el run")
     url = st.text_input("Link del webchat", value=cfg.get("url", ""),
                         placeholder="https://...", key=f"url-{empresa}")
     tarea = st.text_area(
@@ -461,7 +583,8 @@ with tab_run:
                     "límite y reportá bugs. Si te paso el prompt, sugerí correcciones.",
         height=110, key=f"tarea-{empresa}")
 
-    st.markdown("**Contexto (opcional)** — arrastrá archivos o pegá texto:")
+    st.markdown("##### 📎 Contexto (opcional)")
+    st.caption("Arrastrá archivos o pegá texto (prompt actual, banco de preguntas, etc.).")
     c1, c2 = st.columns(2)
     with c1:
         uploaded = st.file_uploader("Arrastrá archivos", accept_multiple_files=True,
@@ -532,9 +655,11 @@ with tab_run:
             return "Falta describir la tarea del agente."
         return None
 
+    st.markdown("#### 🚀 Lanzar")
     col_run, col_def, col_perf = st.columns([3, 2, 2])
-    ejecutar = col_run.button("🚀 Ejecutar Agente", type="primary")
-    if col_def.button("💾 Guardar default"):
+    ejecutar = col_run.button("🚀 Ejecutar Agente", type="primary",
+                              use_container_width=True)
+    if col_def.button("💾 Guardar default", use_container_width=True):
         guardar_config(empresa, {"url": url, "tarea_default": tarea,
                                  "input_sel": input_sel, "msg_sel": msg_sel})
         st.success(f"Defaults guardados para **{nombre_empresa(empresa)}**.")
@@ -542,7 +667,7 @@ with tab_run:
     nombre_perfil = col_perf.text_input("Nombre del perfil", key=f"nuevo-perfil-{empresa}",
                                         label_visibility="collapsed",
                                         placeholder="Nombre del perfil…")
-    if col_perf.button("💾 Guardar perfil"):
+    if col_perf.button("⭐ Guardar perfil", use_container_width=True):
         if not nombre_perfil.strip():
             st.warning("Poné un nombre para el perfil.")
         else:
@@ -567,11 +692,16 @@ with tab_run:
         st.markdown("#### ⭐ Perfiles guardados")
         st.caption("Lanzá un perfil con 1 click. Podés lanzar varios y corren en paralelo.")
         for p in perfiles:
-            pc = st.columns([5, 1, 1])
+          with st.container(border=True):
+            pc = st.columns([6, 1, 1])
             ctx_n = len(p.get("contexto") or [])
-            pc[0].markdown(f"**{p.get('nombre', p.get('slug'))}** — "
-                           f"`{(p.get('tarea') or '')[:50]}` · {ctx_n} ctx")
-            if pc[1].button("▶️", key=f"run-perfil-{p['slug']}", help="Lanzar este perfil"):
+            pc[0].markdown(
+                f"**⭐ {p.get('nombre', p.get('slug'))}**<br>"
+                f"<span style='color:#9499ab;font-size:.82rem'>"
+                f"{(p.get('tarea') or '')[:60]} · {ctx_n} archivo(s) de contexto</span>",
+                unsafe_allow_html=True)
+            if pc[1].button("▶️", key=f"run-perfil-{p['slug']}", help="Lanzar este perfil",
+                            use_container_width=True):
                 err = _faltantes(p.get("url"), p.get("tarea"))
                 if err:
                     st.error(err)
@@ -586,12 +716,13 @@ with tab_run:
                     }, es_sdk, api_key, motor)
                     st.success(f"🚀 Lanzado perfil **{p.get('nombre')}**.")
                     st.rerun()
-            if pc[2].button("🗑️", key=f"del-perfil-{p['slug']}", help="Borrar perfil"):
+            if pc[2].button("🗑️", key=f"del-perfil-{p['slug']}", help="Borrar perfil",
+                            use_container_width=True):
                 borrar_perfil(empresa, p["slug"])
                 st.rerun()
 
 
-with tab_hist:
+elif seccion == "Runs anteriores":
     st.markdown(f"### 🗂️ Runs anteriores — {nombre_empresa(empresa)}")
     empresa_runs = RUNS_DIR / empresa
     dirs = sorted([d for d in empresa_runs.iterdir() if d.is_dir()], reverse=True) \

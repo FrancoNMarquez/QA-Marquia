@@ -14,22 +14,65 @@ Pensada para correr **local, por usuario**.
 - **API key de Anthropic** — pago por uso (~centavos por run). Cada uno pega su key en la UI.
   Útil si no querés depender del login de Claude Code o para tandas grandes.
 
-## Setup
+## Instalación
 
-`python3-venv` puede no estar disponible; creá el venv así:
+> Funciona en **Windows, macOS y Linux** (no hace falta Linux). Requiere **Python 3.10+**.
+> Se crea un entorno virtual (`venv/`), se instalan las dependencias y el navegador de Playwright.
 
+### 🪟 Windows (PowerShell)
+```powershell
+cd webchat-qa
+python -m venv venv
+venv\Scripts\pip install -r requirements.txt
+venv\Scripts\playwright install chromium
+venv\Scripts\streamlit run app.py
+```
+
+### 🍎 macOS
 ```bash
 cd webchat-qa
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+venv/bin/playwright install chromium
+venv/bin/streamlit run app.py
+```
+
+### 🐧 Linux
+```bash
+cd webchat-qa
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+venv/bin/playwright install chromium
+venv/bin/streamlit run app.py
+```
+
+<details>
+<summary>Linux: si <code>python3 -m venv</code> falla (falta <code>python3-venv</code>)</summary>
+
+Instalá el paquete (`sudo apt install python3-venv`) **o** creá el venv sin pip y bootstrapealo:
+
+```bash
 python3 -m venv --without-pip venv
 curl -sS https://bootstrap.pypa.io/get-pip.py | venv/bin/python3
 venv/bin/pip install -r requirements.txt
 venv/bin/playwright install chromium
 ```
+</details>
 
-## Correr
+Después abrí 👉 **http://localhost:8501**
+
+### Sobre los motores y el sistema operativo
+- **API key de Anthropic** → solo necesita Python; funciona igual en los tres OS. **Es la
+  opción más simple para repartir al equipo.**
+- **Claude Code (suscripción)** → además necesita el CLI `claude` instalado y logueado. Existe
+  para Windows, macOS y Linux, pero es un paso de instalación extra por persona.
+
+## Correr (las próximas veces)
 
 ```bash
-venv/bin/streamlit run app.py      # abre http://localhost:8501
+# Windows:  venv\Scripts\streamlit run app.py
+# macOS/Linux:
+venv/bin/streamlit run app.py      # abre http://localhost:8501  ·  cortar con Ctrl+C
 ```
 
 En la app:
