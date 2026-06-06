@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -27,6 +28,7 @@ from streamlit_option_menu import option_menu
 from engine import agent_runner as eng_api
 from engine import agent_runner_sdk as eng_sdk
 from engine import jobs
+from engine import prompt_fixer as eng_fix
 from engine.agent_runner import inspect_webchat
 from engine.reporting import construir_reporte_md, construir_transcript_md
 
@@ -60,7 +62,14 @@ CSS = """
 <style>
 /* ---------- tipografía y base (tema oscuro) ---------- */
 html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
-.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
+/* Container central a ancho completo (sin el max-width que dejaba aire) y con
+   poco padding lateral, para que el contenido use toda la pantalla —sobre todo
+   con la barra lateral cerrada. */
+.block-container, [data-testid="stMainBlockContainer"] {
+  padding-top: 2.2rem; padding-bottom: 3rem;
+  padding-left: 2.5rem; padding-right: 2.5rem;
+  max-width: 100%;
+}
 
 /* ---------- hero ---------- */
 .hero {
@@ -136,8 +145,17 @@ html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-s
 h4 { font-weight: 800; letter-spacing:-.01em; margin-top:.4rem; }
 h5 { font-weight: 700; color:#c9cce0; }
 
-/* ---------- divisores más sutiles ---------- */
-hr { margin: .8rem 0; border-color:#232838; }
+/* ---------- divisores más sutiles ----------
+   Streamlit pinta el <hr> de st.divider() con el textColor del tema (#e7e9f3),
+   o sea casi blanco → se ve como una "barra blanca" fea sobre el fondo oscuro.
+   Necesita !important para ganarle a la regla temada (incluye el divisor que
+   queda entre el panel "Runs en curso" y el nav). */
+hr, [data-testid="stDivider"] {
+  margin: .8rem 0 !important;
+  border-color: #232838 !important;
+  border-top-color: #232838 !important;
+  background: transparent !important;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -271,11 +289,21 @@ def leer_uploads(uploaded, texto_pegado):
 
 
 def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, contexto,
-                uso=None):
-    """Persiste un run en runs/<empresa>/<ts>-<slug>/ y devuelve el dict del run."""
+                uso=None, tipo="qa", run_id=None):
+    """Persiste un run en runs/<empresa>/<ts>-<slug>-<id>/ y devuelve el dict del run.
+
+    `tipo` distingue un QA de webchat ("qa") de una corrección de prompts
+    ("correccion"); cambia solo el nombre del subdirectorio. `run_id` es un sufijo
+    único (el id del job) para que dos runs en paralelo que terminan el mismo
+    segundo con el mismo slug NO compartan carpeta y se pisen los archivos."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dom = urlparse(url).netloc or "webchat"
-    run_dir = RUNS_DIR / empresa / f"{ts}-{_slug(dom + '-' + tarea)}"
+    if tipo == "correccion":
+        base = "correccion-" + _slug(tarea)
+    else:
+        dom = urlparse(url).netloc or "webchat"
+        base = _slug(dom + "-" + tarea)
+    sufijo = run_id or uuid4().hex[:6]
+    run_dir = RUNS_DIR / empresa / f"{ts}-{base}-{sufijo}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     archivos_final = dict(archivos)  # nombre -> contenido
@@ -298,7 +326,7 @@ def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, cont
 
     (run_dir / "inputs.json").write_text(json.dumps(
         {"empresa": empresa, "url": url, "tarea": tarea, "modelo": modelo, "fecha": ts,
-         "veredicto": (reporte or {}).get("veredicto"), "uso": uso},
+         "tipo": tipo, "veredicto": (reporte or {}).get("veredicto"), "uso": uso},
         ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {"dir": str(run_dir), "url": url, "tarea": tarea, "modelo": modelo,
@@ -310,9 +338,23 @@ def _persistir_job(job):
     """Callback de jobs.lanzar: guarda en disco el run cuando el job termina."""
     snap = job.snapshot()
     m = snap["meta"]
-    run = guardar_run(m["empresa"], m["url"], m["tarea"], m["modelo"],
+    tipo = m.get("tipo", "qa")
+    run = guardar_run(m.get("empresa"), m.get("url", ""), m["tarea"], m["modelo"],
                       snap["transcript"], snap["archivos"], snap["reporte"],
-                      m.get("contexto") or [], snap["uso"])
+                      m.get("contexto") or [], snap["uso"], tipo=tipo,
+                      run_id=snap.get("id"))
+    # Para correcciones, opcionalmente copiar los .md corregidos a una carpeta destino.
+    destino = m.get("destino")
+    if tipo == "correccion" and destino:
+        try:
+            dp = Path(destino).expanduser()
+            dp.mkdir(parents=True, exist_ok=True)
+            for nombre, contenido in (snap["archivos"] or {}).items():
+                if nombre in ("report.md", "transcript.md"):
+                    continue
+                (dp / nombre).write_text(contenido, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
     job.set(saved=run)
 
 
@@ -325,8 +367,77 @@ def lanzar_run(empresa, datos, es_sdk, api_key, motor_label):
                   headless=datos["headless"], selectors=datos.get("selectors") or {})
     meta = dict(empresa=empresa, url=datos["url"], tarea=datos["tarea"],
                 modelo=datos["modelo"], contexto=datos.get("contexto") or [],
-                motor_label=motor_label)
+                motor_label=motor_label, tipo="qa")
     return jobs.lanzar(runner, params, meta, on_done=_persistir_job)
+
+
+def lanzar_correccion(empresa, prompts, reporte_txt, modelo, max_turnos, es_sdk,
+                      api_key, motor_label, destino=""):
+    """Lanza en background una corrección de prompts (motor sin webchat)."""
+    runner = eng_fix.run_stream_sdk if es_sdk else eng_fix.run_stream_api
+    if es_sdk:
+        params = dict(prompts=prompts, reporte=reporte_txt, modelo=modelo,
+                      max_turnos=max_turnos)
+    else:
+        params = dict(prompts=prompts, reporte=reporte_txt, api_key=api_key,
+                      modelo=modelo, max_turnos=max_turnos)
+    nombres = ", ".join(p["nombre"] for p in prompts)[:50]
+    tarea = f"Mejorar prompt: {nombres}"
+    # Guardamos como contexto del run los prompts originales + el reporte usado.
+    contexto_guardar = list(prompts)
+    if reporte_txt and reporte_txt.strip():
+        contexto_guardar.append({"nombre": "reporte_qa.md", "contenido": reporte_txt})
+    meta = dict(empresa=empresa, url="", tarea=tarea, modelo=modelo,
+                contexto=contexto_guardar, motor_label=motor_label,
+                tipo="correccion", destino=destino or "")
+    return jobs.lanzar(runner, params, meta, on_done=_persistir_job)
+
+
+def _decode_bytes(raw):
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1", errors="replace")
+
+
+def leer_md_carpeta(path_str):
+    """Lee los *.md / *.txt de una carpeta local. [] si la ruta no existe/no es dir."""
+    if not path_str or not path_str.strip():
+        return []
+    p = Path(path_str.strip()).expanduser()
+    if not p.exists() or not p.is_dir():
+        return []
+    out = []
+    for f in sorted(p.glob("*.md")) + sorted(p.glob("*.txt")):
+        try:
+            out.append({"nombre": f.name, "contenido": f.read_text(encoding="utf-8")})
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def listar_runs_con_reporte(empresa):
+    """Runs de la empresa que tienen un report.md (para reusarlo como reporte de QA)."""
+    base = RUNS_DIR / empresa
+    if not base.exists():
+        return []
+    out = []
+    for d in sorted([x for x in base.iterdir() if x.is_dir()], reverse=True):
+        rep = d / "report.md"
+        if not rep.exists():
+            continue
+        meta = {}
+        f = d / "inputs.json"
+        if f.exists():
+            try:
+                meta = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                meta = {}
+        # Usar el nombre renombrado si existe (mismo criterio que "Runs anteriores").
+        nombre_run = meta.get("nombre") or meta.get("tarea") or d.name
+        label = f"{meta.get('fecha', d.name)} — {nombre_run[:50]}"
+        out.append({"label": label, "path": str(rep)})
+    return out
 
 
 def render_transcript_vivo(transcript, n=14):
@@ -420,7 +531,8 @@ def render_job(s):
         "corriendo": '<span class="badge badge-run">⏳ en curso</span>',
         "terminado": '<span class="badge badge-ok">✓ terminado</span>',
         "error": '<span class="badge badge-err">⛔ error</span>',
-    }[s["estado"]]
+        "cancelado": '<span class="badge badge-warn">⏹ frenado</span>',
+    }.get(s["estado"], s["estado"])
     dur = (s["finished"] or time.time()) - s["started"]
     m = s["meta"]
     rep = (s.get("saved") or {}).get("reporte") or s.get("reporte") or {}
@@ -441,6 +553,11 @@ def render_job(s):
         st.caption(f"{m.get('motor_label', '')} · {m.get('modelo', '')} · {m.get('url', '')}")
 
         if s["estado"] == "corriendo":
+            if st.button("⏹ Frenar", key=f"stop-{s['id']}",
+                         help="Detener este run (corta en el próximo paso del agente)"):
+                jobs.cancelar(s["id"])
+                st.toast("⏹ Frenando el run…")
+                st.rerun()
             with st.container(height=260):
                 render_transcript_vivo(s["transcript"])
         elif s["estado"] == "error":
@@ -462,9 +579,8 @@ def render_job(s):
             st.caption("Detalle completo en la sección 🗂️ Runs anteriores.")
 
 
-@st.fragment(run_every=2)
-def panel_jobs(empresa):
-    """Panel auto-refrescante (cada 2 s) de los runs de la empresa activa."""
+def _render_panel(empresa):
+    """Cuerpo del panel de runs (sin fragment). Devuelve cuántos están corriendo."""
     snaps = jobs.listar(empresa)
     activos = [s for s in snaps if s["estado"] == "corriendo"]
     head = st.columns([4, 1])
@@ -472,11 +588,28 @@ def panel_jobs(empresa):
     if head[1].button("🧹 Limpiar terminados", key="limpiar_jobs",
                       disabled=not snaps or len(activos) == len(snaps)):
         jobs.limpiar_terminados()
-        st.rerun(scope="fragment")
+        st.rerun()
     if not snaps:
         st.caption("No hay runs en esta sesión.")
     for s in snaps:
         render_job(s)
+    return len(activos)
+
+
+@st.fragment(run_every=2)
+def panel_jobs_live(empresa):
+    """Panel con auto-refresco cada 2 s — solo mientras hay runs corriendo."""
+    activos = _render_panel(empresa)
+    if activos == 0:
+        # Ya no queda nada corriendo: salgo del modo auto-refresco con un rerun
+        # COMPLETO. Si no, el fragment se sigue re-ejecutando cada 2 s y eso
+        # bloquea la navegación del option_menu y reflashea el nav (barra blanca).
+        st.rerun()
+
+
+def panel_jobs_static(empresa):
+    """Panel sin auto-refresco (todos los runs terminados)."""
+    _render_panel(empresa)
 
 
 # ----------------------------- sidebar -------------------------------------
@@ -550,16 +683,12 @@ st.markdown(
     'reporte + archivos corregidos. Podés lanzar varios runs en paralelo.</p></div>',
     unsafe_allow_html=True)
 
-# Panel de runs en curso/recientes (arriba del nav para que el auto-refresh no
-# interfiera con la sección activa). Solo se muestra si hay jobs en esta sesión.
-if jobs.listar(empresa):
-    st.markdown("### 🔴 Runs en curso / recientes")
-    panel_jobs(empresa)
-    st.divider()
-
+# El nav va PRIMERO (posición estable): así el iframe del option_menu no se
+# re-monta cuando aparece/cambia el panel de runs, que era lo que dejaba una
+# "barra blanca" mientras un run estaba corriendo.
 seccion = option_menu(
-    None, ["Nuevo run", "Runs anteriores"],
-    icons=["play-circle-fill", "clock-history"], orientation="horizontal", key="nav",
+    None, ["Nuevo run", "Mejorar prompt", "Runs anteriores"],
+    icons=["play-circle-fill", "magic", "clock-history"], orientation="horizontal", key="nav",
     styles={
         "container": {"padding": "4px", "background-color": "#171a24",
                       "border-radius": "12px", "border": "1px solid #262b3a"},
@@ -570,28 +699,45 @@ seccion = option_menu(
         "icon": {"font-size": "0.95rem", "color": "#aab2ff"},
     })
 
+# Panel de runs en curso/recientes (debajo del nav). Solo se muestra si hay jobs
+# en esta sesión. Auto-refresca SOLO si hay alguno corriendo; con todos
+# terminados se rendea estático para no trabar la navegación.
+_snaps_now = jobs.listar(empresa)
+if _snaps_now:
+    st.markdown("### 🔴 Runs en curso / recientes")
+    if any(s["estado"] == "corriendo" for s in _snaps_now):
+        panel_jobs_live(empresa)
+    else:
+        panel_jobs_static(empresa)
+    st.divider()
+
 if seccion == "Nuevo run":
     cfg = cargar_config(empresa)
+    # Nonce para "limpiar" el formulario tras lanzar: al incrementarlo cambian las
+    # keys de los widgets → Streamlit los crea de cero (vacíos). Es más fiable que
+    # borrar keys de session_state (que no siempre limpia con widgets + value=).
+    nonce = st.session_state.get("_nuevo_nonce", 0)
     st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
 
     st.markdown("#### 📝 Definí el run")
     url = st.text_input("Link del webchat", value=cfg.get("url", ""),
-                        placeholder="https://...", key=f"url-{empresa}")
+                        placeholder="https://...", key=f"url-{empresa}-{nonce}")
     tarea = st.text_area(
         "Tarea del agente", value=cfg.get("tarea_default", ""),
         placeholder="Ej: Registrate como cliente y completá la trivia. Probá casos "
                     "límite y reportá bugs. Si te paso el prompt, sugerí correcciones.",
-        height=110, key=f"tarea-{empresa}")
+        height=110, key=f"tarea-{empresa}-{nonce}")
 
     st.markdown("##### 📎 Contexto (opcional)")
     st.caption("Arrastrá archivos o pegá texto (prompt actual, banco de preguntas, etc.).")
     c1, c2 = st.columns(2)
     with c1:
         uploaded = st.file_uploader("Arrastrá archivos", accept_multiple_files=True,
-                                    type=None)
+                                    type=None, key=f"upload-{empresa}-{nonce}")
     with c2:
         texto_pegado = st.text_area("...o pegá texto", height=120,
-                                    placeholder="Prompt actual, banco de preguntas, etc.")
+                                    placeholder="Prompt actual, banco de preguntas, etc.",
+                                    key=f"ctx-text-{empresa}-{nonce}")
 
     with st.expander("🔧 Avanzado (selectores)"):
         col_a, col_b = st.columns(2)
@@ -656,6 +802,11 @@ if seccion == "Nuevo run":
         return None
 
     st.markdown("#### 🚀 Lanzar")
+    # El nombre del perfil va en su propia fila para que los 3 botones de abajo
+    # queden alineados (antes "Guardar perfil" colgaba debajo de este campo).
+    nombre_perfil = st.text_input(
+        "Nombre del perfil (opcional, para guardar este run como perfil)",
+        key=f"nuevo-perfil-{empresa}-{nonce}", placeholder="Nombre del perfil…")
     col_run, col_def, col_perf = st.columns([3, 2, 2])
     ejecutar = col_run.button("🚀 Ejecutar Agente", type="primary",
                               use_container_width=True)
@@ -663,10 +814,6 @@ if seccion == "Nuevo run":
         guardar_config(empresa, {"url": url, "tarea_default": tarea,
                                  "input_sel": input_sel, "msg_sel": msg_sel})
         st.success(f"Defaults guardados para **{nombre_empresa(empresa)}**.")
-
-    nombre_perfil = col_perf.text_input("Nombre del perfil", key=f"nuevo-perfil-{empresa}",
-                                        label_visibility="collapsed",
-                                        placeholder="Nombre del perfil…")
     if col_perf.button("⭐ Guardar perfil", use_container_width=True):
         if not nombre_perfil.strip():
             st.warning("Poné un nombre para el perfil.")
@@ -682,6 +829,7 @@ if seccion == "Nuevo run":
             st.error(err)
         else:
             lanzar_run(empresa, _datos_form(), es_sdk, api_key, motor)
+            st.session_state["_nuevo_nonce"] = nonce + 1   # limpiar el form (key nueva)
             st.success("🚀 Run lanzado. Lo seguís arriba en **Runs en curso**.")
             st.rerun()
 
@@ -722,6 +870,83 @@ if seccion == "Nuevo run":
                 st.rerun()
 
 
+elif seccion == "Mejorar prompt":
+    # Nonce para limpiar el formulario tras generar (ver nota en "Nuevo run").
+    fnonce = st.session_state.get("_fix_nonce", 0)
+    st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
+    st.markdown("#### ✨ Mejorar prompt")
+    st.caption("Subí el/los prompt(s) actuales y el reporte de QA. El agente devuelve cada "
+               "prompt corregido (un archivo por prompt), listo para copiar y pegar.")
+
+    st.markdown("##### 1) Prompts actuales")
+    up_prompts = st.file_uploader("Arrastrá los .md / .txt de los prompts",
+                                  accept_multiple_files=True, type=["md", "txt"],
+                                  key=f"fix-prompts-{empresa}-{fnonce}")
+    carpeta_origen = st.text_input(
+        "…o pegá la ruta de una carpeta local con .md (opcional)",
+        key=f"fix-origen-{empresa}-{fnonce}",
+        placeholder="/home/.../prompts/prompts_actuales")
+
+    st.markdown("##### 2) Reporte de QA")
+    runs_rep = listar_runs_con_reporte(empresa)
+    sel_run = None
+    if runs_rep:
+        opciones = ["— no usar —"] + [r["label"] for r in runs_rep]
+        elegido = st.selectbox("Tomá el reporte de un run anterior", opciones,
+                               key=f"fix-run-{empresa}-{fnonce}",
+                               help="Reusa el report.md de un QA previo de esta empresa.")
+        if elegido != "— no usar —":
+            sel_run = runs_rep[opciones.index(elegido) - 1]
+    else:
+        st.caption("Todavía no hay runs con reporte en esta empresa. Subí el reporte abajo.")
+    up_reporte = st.file_uploader("…o subí el reporte (.md / .txt)", type=["md", "txt"],
+                                  key=f"fix-reporte-{empresa}-{fnonce}")
+
+    st.markdown("##### 3) Salida")
+    carpeta_destino = st.text_input(
+        "Carpeta destino para guardar los corregidos (opcional)",
+        key=f"fix-destino-{empresa}-{fnonce}",
+        placeholder="/home/.../prompts/prompts_corregido")
+
+    # ---- resolver entradas ----
+    prompts_fix = leer_uploads(up_prompts, None)
+    if not prompts_fix and carpeta_origen.strip():
+        prompts_fix = leer_md_carpeta(carpeta_origen)
+        if not prompts_fix:
+            st.warning("No encontré .md/.txt en esa carpeta (o la ruta no existe).")
+
+    reporte_txt = ""
+    fuente_rep = ""
+    if up_reporte is not None:
+        reporte_txt = _decode_bytes(up_reporte.getvalue())
+        fuente_rep = f"archivo subido ({up_reporte.name})"
+    elif sel_run:
+        try:
+            reporte_txt = Path(sel_run["path"]).read_text(encoding="utf-8")
+            fuente_rep = f"run anterior ({sel_run['label']})"
+        except Exception:  # noqa: BLE001
+            reporte_txt = ""
+
+    rc1, rc2 = st.columns(2)
+    rc1.caption(f"📄 Prompts: **{len(prompts_fix)}**" if prompts_fix
+                else "📄 Prompts: ninguno")
+    rc2.caption(f"🧾 Reporte: **{fuente_rep}**" if reporte_txt else "🧾 Reporte: ninguno")
+
+    if st.button("✨ Generar prompts corregidos", type="primary"):
+        if not es_sdk and not api_key:
+            st.error("Falta la API key (cargala en la barra lateral) o cambiá a Claude Code.")
+        elif not prompts_fix:
+            st.error("Subí al menos un prompt (o pegá una ruta de carpeta válida).")
+        elif not reporte_txt:
+            st.error("Falta el reporte de QA (elegí un run anterior o subilo).")
+        else:
+            lanzar_correccion(empresa, prompts_fix, reporte_txt, modelo, max_turnos,
+                              es_sdk, api_key, motor, carpeta_destino.strip())
+            st.session_state["_fix_nonce"] = fnonce + 1   # limpiar el form (key nueva)
+            st.success("✨ Corrección lanzada. La seguís arriba en **Runs en curso**.")
+            st.rerun()
+
+
 elif seccion == "Runs anteriores":
     st.markdown(f"### 🗂️ Runs anteriores — {nombre_empresa(empresa)}")
     empresa_runs = RUNS_DIR / empresa
@@ -739,8 +964,26 @@ elif seccion == "Runs anteriores":
                 meta = {}
         icono = {"aprobado": "✅", "aprobado_con_observaciones": "⚠️",
                  "rechazado": "❌"}.get(meta.get("veredicto"), "•")
-        titulo = f"{icono} {meta.get('fecha', d.name)} — {meta.get('tarea', d.name)[:70]}"
+        nombre_run = meta.get("nombre") or meta.get("tarea") or d.name
+        titulo = f"{icono} {meta.get('fecha', d.name)} — {nombre_run[:70]}"
         with st.expander(titulo):
+            # Renombrar el run (guarda 'nombre' en inputs.json; no toca la carpeta).
+            rn = st.columns([4, 1])
+            nuevo_nombre = rn[0].text_input(
+                "Nombre del run", value=nombre_run, key=f"rename-{d.name}",
+                label_visibility="collapsed")
+            if rn[1].button("💾 Renombrar", key=f"rename-btn-{d.name}",
+                            use_container_width=True):
+                if nuevo_nombre.strip():
+                    meta_nuevo = dict(meta)
+                    meta_nuevo["nombre"] = nuevo_nombre.strip()
+                    inputs_f.write_text(
+                        json.dumps(meta_nuevo, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                    st.success("Nombre actualizado.")
+                    st.rerun()
+                else:
+                    st.warning("Poné un nombre.")
             st.write(f"**Webchat:** {meta.get('url', '—')}")
             st.write(f"**Modelo:** {meta.get('modelo', '—')}")
             if meta.get("uso"):
