@@ -137,8 +137,17 @@ html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-s
 h4 { font-weight: 800; letter-spacing:-.01em; margin-top:.4rem; }
 h5 { font-weight: 700; color:#c9cce0; }
 
-/* ---------- divisores más sutiles ---------- */
-hr { margin: .8rem 0; border-color:#232838; }
+/* ---------- divisores más sutiles ----------
+   Streamlit pinta el <hr> de st.divider() con el textColor del tema (#e7e9f3),
+   o sea casi blanco → se ve como una "barra blanca" fea sobre el fondo oscuro.
+   Necesita !important para ganarle a la regla temada (incluye el divisor que
+   queda entre el panel "Runs en curso" y el nav). */
+hr, [data-testid="stDivider"] {
+  margin: .8rem 0 !important;
+  border-color: #232838 !important;
+  border-top-color: #232838 !important;
+  background: transparent !important;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)

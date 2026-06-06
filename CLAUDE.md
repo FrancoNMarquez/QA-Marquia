@@ -109,8 +109,12 @@ defaults (url, tarea, selectores); `empresas/<empresa>/perfiles/<slug>.json` los
   `CSS` en `app.py`). Los botones fijan `background`/`color` a mano (no dependen del tema) para
   no quedar ilegibles.
 - **`streamlit-option-menu` renderiza en un IFRAME**: Playwright no puede clickear su texto
-  desde el frame principal. (También es la causa de la "barra blanca" anotada en `MEJORAS.md`:
-  el iframe no hereda el tema oscuro.)
+  desde el frame principal.
+- **Dividers casi-blancos**: Streamlit (1.58) pinta el `<hr>` de `st.divider()` con el
+  `textColor` del tema (≈ blanco). El CSS lo corrige con `!important` (`hr,
+  [data-testid="stDivider"] { border-color:#232838 !important }`). Sin el `!important` la regla
+  pierde contra el tema. Ojo también: el testid `stVerticalBlockBorderWrapper` ya no existe en
+  1.58 (la regla de cards quedó inerte, pero rendean OK).
 
 ## Roadmap
 

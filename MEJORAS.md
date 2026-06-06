@@ -74,22 +74,20 @@ Playwright): pura transformación de documentos (prompt + reporte → prompt cor
 - ¿Tomar el reporte de un run anterior automáticamente (recomendado) además de poder subirlo?
 - ¿Nombre de la sección: "Corregir prompts" vs "Mejorar prompt"?
 
-### [BAJA · UI] Barra blanca entre "Runs en curso/recientes" y la definición del run
+### ~~[BAJA · UI] Barra blanca entre "Runs en curso/recientes" y la definición del run~~ — HECHO
 
 - **Síntoma:** franja blanca fea entre el panel "🔴 Runs en curso / recientes" y el nav /
   "Definí el run".
-- **Causa probable:** el componente `streamlit-option-menu` se renderiza en un **IFRAME**; el
-  iframe (y/o su wrapper `stIFrame`/`stCustomComponentV1`) usa **fondo blanco por defecto** que
-  el tema oscuro no pinta → se ve la franja clara. Puede sumar el alto fijo del iframe que deja
-  aire. (Referencia en código: `app.py:556-560`, divider + `option_menu`.)
-- **Fix propuesto** (CSS en la constante `CSS` de `app.py`): poner transparente el iframe del
-  componente y su wrapper, y recortar el alto sobrante:
-  ```css
-  iframe[title="streamlit_option_menu.option_menu"] { background: transparent !important; }
-  div[data-testid="stIFrame"], .stCustomComponentV1 { background: transparent !important; }
-  ```
-  Ajustar el selector exacto inspeccionando el DOM (el `title`/`data-testid` cambia según la
-  versión de Streamlit). Verificar con screenshot de Playwright en :8502.
+- **Causa REAL (no la sospechada):** no era el iframe del `streamlit-option-menu` (ese ya
+  rendea transparente, verificado con Playwright). Era el **`<hr>` de `st.divider()`**: con
+  Streamlit 1.58 el tema pinta el divisor con el `textColor` (#e7e9f3 ≈ blanco). La regla
+  `hr { border-color:#232838 }` del CSS **no ganaba** por falta de `!important`. Hay un
+  `st.divider()` justo entre `panel_jobs` y el `option_menu`, así que se veía como barra clara.
+  (De paso: el viejo selector de tarjetas `[data-testid="stVerticalBlockBorderWrapper"]` ya no
+  existe en 1.58 — quedó muerto pero las cards rendean OK transparentes; no se tocó.)
+- **Fix aplicado** (constante `CSS` de `app.py`): `hr, [data-testid="stDivider"]` con
+  `border-color`/`border-top-color: #232838 !important`. Verificado con Playwright: los `<hr>`
+  pasan de `rgb(231,233,243)` a `rgb(35,40,56)` y el screenshot ya no muestra la barra.
 
 ---
 
