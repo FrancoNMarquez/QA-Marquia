@@ -6,7 +6,19 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
 
 ## 🟣 Pendiente (próximo)
 
-### [ALTA] Feature: "Corregir prompts" a partir del reporte de QA (markdowns carpeta → carpeta)
+### ~~[ALTA] Feature: "Corregir prompts" a partir del reporte de QA~~ — HECHO (sección "Mejorar prompt")
+
+Implementado como sección **"Mejorar prompt"** en el `option_menu`. Decisiones tomadas:
+entrada de prompts por **uploads + ruta de carpeta opcional**; reporte desde **run anterior
+(selector) o subido**; salida **1→1** (`<nombre>_corregido.md` por prompt); carpeta destino
+local opcional. Motor nuevo `engine/prompt_fixer.py` (**sin Playwright**) con `run_stream_api`
+y `run_stream_sdk` que respetan el contrato de eventos, así reusa `jobs.py`, `panel_jobs`,
+`render_resultados` y la persistencia. `guardar_run`/`_persistir_job` ahora aceptan
+`tipo="correccion"` (subdir `correccion-…`, `inputs.json` con `tipo`). El `finalizar` se
+reutiliza como changelog (veredicto = si pudo resolver todo desde el prompt). Verificado:
+`py_compile`, smoke test del contrato de eventos con cliente Anthropic falso
+(`info→archivo→reporte→uso→fin`), y `AppTest` (app carga + branch "Mejorar prompt" renderiza
+sin excepción). El plan original queda abajo como referencia.
 
 **Qué es / por qué.** Es un flujo que ya hicimos a mano y conviene productizar dentro de
 la app: dada una carpeta con (1) el **prompt actual** de un agente y (2) el **reporte de

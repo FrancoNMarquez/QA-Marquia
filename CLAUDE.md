@@ -65,6 +65,10 @@ infra (`jobs.py`, `panel_jobs`, `render_resultados`, persistencia). Tools del ag
   interfaz**. `app.py` elige uno u otro según el toggle del sidebar (`es_sdk`).
 - `engine/chat_driver.py` — wrapper de Playwright (sync): autodetecta input/burbujas, maneja
   streaming. `SITE_DEFAULTS` trae Marquia preconfigurado.
+- `engine/prompt_fixer.py` — runner **sin webchat** (sección "Mejorar prompt"): toma
+  prompt(s) + reporte de QA y devuelve cada prompt corregido. Mismo contrato de eventos +
+  `run_stream_api`/`run_stream_sdk`, así reusa toda la infra. Reusa el `finalizar` como
+  changelog. Persistencia con `tipo="correccion"` en `guardar_run`/`_persistir_job`.
 - `engine/jobs.py` — gestor de runs en paralelo (ver abajo).
 - `engine/reporting.py` — `construir_reporte_md`/`construir_transcript_md`, `TARIFAS`/
   `costo_estimado`/`formatear_uso` (panel de uso: tokens, costo, % suscripción).

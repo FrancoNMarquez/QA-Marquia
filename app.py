@@ -27,6 +27,7 @@ from streamlit_option_menu import option_menu
 from engine import agent_runner as eng_api
 from engine import agent_runner_sdk as eng_sdk
 from engine import jobs
+from engine import prompt_fixer as eng_fix
 from engine.agent_runner import inspect_webchat
 from engine.reporting import construir_reporte_md, construir_transcript_md
 
@@ -271,11 +272,18 @@ def leer_uploads(uploaded, texto_pegado):
 
 
 def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, contexto,
-                uso=None):
-    """Persiste un run en runs/<empresa>/<ts>-<slug>/ y devuelve el dict del run."""
+                uso=None, tipo="qa"):
+    """Persiste un run en runs/<empresa>/<ts>-<slug>/ y devuelve el dict del run.
+
+    `tipo` distingue un QA de webchat ("qa") de una corrección de prompts
+    ("correccion"); cambia solo el nombre del subdirectorio."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dom = urlparse(url).netloc or "webchat"
-    run_dir = RUNS_DIR / empresa / f"{ts}-{_slug(dom + '-' + tarea)}"
+    if tipo == "correccion":
+        base = "correccion-" + _slug(tarea)
+    else:
+        dom = urlparse(url).netloc or "webchat"
+        base = _slug(dom + "-" + tarea)
+    run_dir = RUNS_DIR / empresa / f"{ts}-{base}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     archivos_final = dict(archivos)  # nombre -> contenido
@@ -298,7 +306,7 @@ def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, cont
 
     (run_dir / "inputs.json").write_text(json.dumps(
         {"empresa": empresa, "url": url, "tarea": tarea, "modelo": modelo, "fecha": ts,
-         "veredicto": (reporte or {}).get("veredicto"), "uso": uso},
+         "tipo": tipo, "veredicto": (reporte or {}).get("veredicto"), "uso": uso},
         ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {"dir": str(run_dir), "url": url, "tarea": tarea, "modelo": modelo,
@@ -310,9 +318,22 @@ def _persistir_job(job):
     """Callback de jobs.lanzar: guarda en disco el run cuando el job termina."""
     snap = job.snapshot()
     m = snap["meta"]
-    run = guardar_run(m["empresa"], m["url"], m["tarea"], m["modelo"],
+    tipo = m.get("tipo", "qa")
+    run = guardar_run(m.get("empresa"), m.get("url", ""), m["tarea"], m["modelo"],
                       snap["transcript"], snap["archivos"], snap["reporte"],
-                      m.get("contexto") or [], snap["uso"])
+                      m.get("contexto") or [], snap["uso"], tipo=tipo)
+    # Para correcciones, opcionalmente copiar los .md corregidos a una carpeta destino.
+    destino = m.get("destino")
+    if tipo == "correccion" and destino:
+        try:
+            dp = Path(destino).expanduser()
+            dp.mkdir(parents=True, exist_ok=True)
+            for nombre, contenido in (snap["archivos"] or {}).items():
+                if nombre in ("report.md", "transcript.md"):
+                    continue
+                (dp / nombre).write_text(contenido, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
     job.set(saved=run)
 
 
@@ -325,8 +346,75 @@ def lanzar_run(empresa, datos, es_sdk, api_key, motor_label):
                   headless=datos["headless"], selectors=datos.get("selectors") or {})
     meta = dict(empresa=empresa, url=datos["url"], tarea=datos["tarea"],
                 modelo=datos["modelo"], contexto=datos.get("contexto") or [],
-                motor_label=motor_label)
+                motor_label=motor_label, tipo="qa")
     return jobs.lanzar(runner, params, meta, on_done=_persistir_job)
+
+
+def lanzar_correccion(empresa, prompts, reporte_txt, modelo, max_turnos, es_sdk,
+                      api_key, motor_label, destino=""):
+    """Lanza en background una corrección de prompts (motor sin webchat)."""
+    runner = eng_fix.run_stream_sdk if es_sdk else eng_fix.run_stream_api
+    if es_sdk:
+        params = dict(prompts=prompts, reporte=reporte_txt, modelo=modelo,
+                      max_turnos=max_turnos)
+    else:
+        params = dict(prompts=prompts, reporte=reporte_txt, api_key=api_key,
+                      modelo=modelo, max_turnos=max_turnos)
+    nombres = ", ".join(p["nombre"] for p in prompts)[:50]
+    tarea = f"Mejorar prompt: {nombres}"
+    # Guardamos como contexto del run los prompts originales + el reporte usado.
+    contexto_guardar = list(prompts)
+    if reporte_txt and reporte_txt.strip():
+        contexto_guardar.append({"nombre": "reporte_qa.md", "contenido": reporte_txt})
+    meta = dict(empresa=empresa, url="", tarea=tarea, modelo=modelo,
+                contexto=contexto_guardar, motor_label=motor_label,
+                tipo="correccion", destino=destino or "")
+    return jobs.lanzar(runner, params, meta, on_done=_persistir_job)
+
+
+def _decode_bytes(raw):
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1", errors="replace")
+
+
+def leer_md_carpeta(path_str):
+    """Lee los *.md / *.txt de una carpeta local. [] si la ruta no existe/no es dir."""
+    if not path_str or not path_str.strip():
+        return []
+    p = Path(path_str.strip()).expanduser()
+    if not p.exists() or not p.is_dir():
+        return []
+    out = []
+    for f in sorted(p.glob("*.md")) + sorted(p.glob("*.txt")):
+        try:
+            out.append({"nombre": f.name, "contenido": f.read_text(encoding="utf-8")})
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def listar_runs_con_reporte(empresa):
+    """Runs de la empresa que tienen un report.md (para reusarlo como reporte de QA)."""
+    base = RUNS_DIR / empresa
+    if not base.exists():
+        return []
+    out = []
+    for d in sorted([x for x in base.iterdir() if x.is_dir()], reverse=True):
+        rep = d / "report.md"
+        if not rep.exists():
+            continue
+        meta = {}
+        f = d / "inputs.json"
+        if f.exists():
+            try:
+                meta = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                meta = {}
+        label = f"{meta.get('fecha', d.name)} — {(meta.get('tarea') or d.name)[:50]}"
+        out.append({"label": label, "path": str(rep)})
+    return out
 
 
 def render_transcript_vivo(transcript, n=14):
@@ -558,8 +646,8 @@ if jobs.listar(empresa):
     st.divider()
 
 seccion = option_menu(
-    None, ["Nuevo run", "Runs anteriores"],
-    icons=["play-circle-fill", "clock-history"], orientation="horizontal", key="nav",
+    None, ["Nuevo run", "Mejorar prompt", "Runs anteriores"],
+    icons=["play-circle-fill", "magic", "clock-history"], orientation="horizontal", key="nav",
     styles={
         "container": {"padding": "4px", "background-color": "#171a24",
                       "border-radius": "12px", "border": "1px solid #262b3a"},
@@ -720,6 +808,80 @@ if seccion == "Nuevo run":
                             use_container_width=True):
                 borrar_perfil(empresa, p["slug"])
                 st.rerun()
+
+
+elif seccion == "Mejorar prompt":
+    st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
+    st.markdown("#### ✨ Mejorar prompt")
+    st.caption("Subí el/los prompt(s) actuales y el reporte de QA. El agente devuelve cada "
+               "prompt corregido (un archivo por prompt), listo para copiar y pegar.")
+
+    st.markdown("##### 1) Prompts actuales")
+    up_prompts = st.file_uploader("Arrastrá los .md / .txt de los prompts",
+                                  accept_multiple_files=True, type=["md", "txt"],
+                                  key="fix-prompts")
+    carpeta_origen = st.text_input(
+        "…o pegá la ruta de una carpeta local con .md (opcional)",
+        key=f"fix-origen-{empresa}",
+        placeholder="/home/.../prompts/prompts_actuales")
+
+    st.markdown("##### 2) Reporte de QA")
+    runs_rep = listar_runs_con_reporte(empresa)
+    sel_run = None
+    if runs_rep:
+        opciones = ["— no usar —"] + [r["label"] for r in runs_rep]
+        elegido = st.selectbox("Tomá el reporte de un run anterior", opciones,
+                               key=f"fix-run-{empresa}",
+                               help="Reusa el report.md de un QA previo de esta empresa.")
+        if elegido != "— no usar —":
+            sel_run = runs_rep[opciones.index(elegido) - 1]
+    else:
+        st.caption("Todavía no hay runs con reporte en esta empresa. Subí el reporte abajo.")
+    up_reporte = st.file_uploader("…o subí el reporte (.md / .txt)", type=["md", "txt"],
+                                  key="fix-reporte")
+
+    st.markdown("##### 3) Salida")
+    carpeta_destino = st.text_input(
+        "Carpeta destino para guardar los corregidos (opcional)",
+        key=f"fix-destino-{empresa}",
+        placeholder="/home/.../prompts/prompts_corregido")
+
+    # ---- resolver entradas ----
+    prompts_fix = leer_uploads(up_prompts, None)
+    if not prompts_fix and carpeta_origen.strip():
+        prompts_fix = leer_md_carpeta(carpeta_origen)
+        if not prompts_fix:
+            st.warning("No encontré .md/.txt en esa carpeta (o la ruta no existe).")
+
+    reporte_txt = ""
+    fuente_rep = ""
+    if up_reporte is not None:
+        reporte_txt = _decode_bytes(up_reporte.getvalue())
+        fuente_rep = f"archivo subido ({up_reporte.name})"
+    elif sel_run:
+        try:
+            reporte_txt = Path(sel_run["path"]).read_text(encoding="utf-8")
+            fuente_rep = f"run anterior ({sel_run['label']})"
+        except Exception:  # noqa: BLE001
+            reporte_txt = ""
+
+    rc1, rc2 = st.columns(2)
+    rc1.caption(f"📄 Prompts: **{len(prompts_fix)}**" if prompts_fix
+                else "📄 Prompts: ninguno")
+    rc2.caption(f"🧾 Reporte: **{fuente_rep}**" if reporte_txt else "🧾 Reporte: ninguno")
+
+    if st.button("✨ Generar prompts corregidos", type="primary"):
+        if not es_sdk and not api_key:
+            st.error("Falta la API key (cargala en la barra lateral) o cambiá a Claude Code.")
+        elif not prompts_fix:
+            st.error("Subí al menos un prompt (o pegá una ruta de carpeta válida).")
+        elif not reporte_txt:
+            st.error("Falta el reporte de QA (elegí un run anterior o subilo).")
+        else:
+            lanzar_correccion(empresa, prompts_fix, reporte_txt, modelo, max_turnos,
+                              es_sdk, api_key, motor, carpeta_destino.strip())
+            st.success("✨ Corrección lanzada. La seguís arriba en **Runs en curso**.")
+            st.rerun()
 
 
 elif seccion == "Runs anteriores":
