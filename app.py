@@ -559,9 +559,8 @@ def render_job(s):
             st.caption("Detalle completo en la sección 🗂️ Runs anteriores.")
 
 
-@st.fragment(run_every=2)
-def panel_jobs(empresa):
-    """Panel auto-refrescante (cada 2 s) de los runs de la empresa activa."""
+def _render_panel(empresa):
+    """Cuerpo del panel de runs (sin fragment). Devuelve cuántos están corriendo."""
     snaps = jobs.listar(empresa)
     activos = [s for s in snaps if s["estado"] == "corriendo"]
     head = st.columns([4, 1])
@@ -569,11 +568,28 @@ def panel_jobs(empresa):
     if head[1].button("🧹 Limpiar terminados", key="limpiar_jobs",
                       disabled=not snaps or len(activos) == len(snaps)):
         jobs.limpiar_terminados()
-        st.rerun(scope="fragment")
+        st.rerun()
     if not snaps:
         st.caption("No hay runs en esta sesión.")
     for s in snaps:
         render_job(s)
+    return len(activos)
+
+
+@st.fragment(run_every=2)
+def panel_jobs_live(empresa):
+    """Panel con auto-refresco cada 2 s — solo mientras hay runs corriendo."""
+    activos = _render_panel(empresa)
+    if activos == 0:
+        # Ya no queda nada corriendo: salgo del modo auto-refresco con un rerun
+        # COMPLETO. Si no, el fragment se sigue re-ejecutando cada 2 s y eso
+        # bloquea la navegación del option_menu y reflashea el nav (barra blanca).
+        st.rerun()
+
+
+def panel_jobs_static(empresa):
+    """Panel sin auto-refresco (todos los runs terminados)."""
+    _render_panel(empresa)
 
 
 # ----------------------------- sidebar -------------------------------------
@@ -647,11 +663,16 @@ st.markdown(
     'reporte + archivos corregidos. Podés lanzar varios runs en paralelo.</p></div>',
     unsafe_allow_html=True)
 
-# Panel de runs en curso/recientes (arriba del nav para que el auto-refresh no
-# interfiera con la sección activa). Solo se muestra si hay jobs en esta sesión.
-if jobs.listar(empresa):
+# Panel de runs en curso/recientes (arriba del nav). Solo se muestra si hay jobs
+# en esta sesión. Auto-refresca SOLO si hay alguno corriendo; con todos
+# terminados se rendea estático para no trabar la navegación.
+_snaps_now = jobs.listar(empresa)
+if _snaps_now:
     st.markdown("### 🔴 Runs en curso / recientes")
-    panel_jobs(empresa)
+    if any(s["estado"] == "corriendo" for s in _snaps_now):
+        panel_jobs_live(empresa)
+    else:
+        panel_jobs_static(empresa)
     st.divider()
 
 seccion = option_menu(
@@ -669,26 +690,31 @@ seccion = option_menu(
 
 if seccion == "Nuevo run":
     cfg = cargar_config(empresa)
+    # Nonce para "limpiar" el formulario tras lanzar: al incrementarlo cambian las
+    # keys de los widgets → Streamlit los crea de cero (vacíos). Es más fiable que
+    # borrar keys de session_state (que no siempre limpia con widgets + value=).
+    nonce = st.session_state.get("_nuevo_nonce", 0)
     st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
 
     st.markdown("#### 📝 Definí el run")
     url = st.text_input("Link del webchat", value=cfg.get("url", ""),
-                        placeholder="https://...", key=f"url-{empresa}")
+                        placeholder="https://...", key=f"url-{empresa}-{nonce}")
     tarea = st.text_area(
         "Tarea del agente", value=cfg.get("tarea_default", ""),
         placeholder="Ej: Registrate como cliente y completá la trivia. Probá casos "
                     "límite y reportá bugs. Si te paso el prompt, sugerí correcciones.",
-        height=110, key=f"tarea-{empresa}")
+        height=110, key=f"tarea-{empresa}-{nonce}")
 
     st.markdown("##### 📎 Contexto (opcional)")
     st.caption("Arrastrá archivos o pegá texto (prompt actual, banco de preguntas, etc.).")
     c1, c2 = st.columns(2)
     with c1:
         uploaded = st.file_uploader("Arrastrá archivos", accept_multiple_files=True,
-                                    type=None)
+                                    type=None, key=f"upload-{empresa}-{nonce}")
     with c2:
         texto_pegado = st.text_area("...o pegá texto", height=120,
-                                    placeholder="Prompt actual, banco de preguntas, etc.")
+                                    placeholder="Prompt actual, banco de preguntas, etc.",
+                                    key=f"ctx-text-{empresa}-{nonce}")
 
     with st.expander("🔧 Avanzado (selectores)"):
         col_a, col_b = st.columns(2)
@@ -753,6 +779,11 @@ if seccion == "Nuevo run":
         return None
 
     st.markdown("#### 🚀 Lanzar")
+    # El nombre del perfil va en su propia fila para que los 3 botones de abajo
+    # queden alineados (antes "Guardar perfil" colgaba debajo de este campo).
+    nombre_perfil = st.text_input(
+        "Nombre del perfil (opcional, para guardar este run como perfil)",
+        key=f"nuevo-perfil-{empresa}-{nonce}", placeholder="Nombre del perfil…")
     col_run, col_def, col_perf = st.columns([3, 2, 2])
     ejecutar = col_run.button("🚀 Ejecutar Agente", type="primary",
                               use_container_width=True)
@@ -760,10 +791,6 @@ if seccion == "Nuevo run":
         guardar_config(empresa, {"url": url, "tarea_default": tarea,
                                  "input_sel": input_sel, "msg_sel": msg_sel})
         st.success(f"Defaults guardados para **{nombre_empresa(empresa)}**.")
-
-    nombre_perfil = col_perf.text_input("Nombre del perfil", key=f"nuevo-perfil-{empresa}",
-                                        label_visibility="collapsed",
-                                        placeholder="Nombre del perfil…")
     if col_perf.button("⭐ Guardar perfil", use_container_width=True):
         if not nombre_perfil.strip():
             st.warning("Poné un nombre para el perfil.")
@@ -779,6 +806,7 @@ if seccion == "Nuevo run":
             st.error(err)
         else:
             lanzar_run(empresa, _datos_form(), es_sdk, api_key, motor)
+            st.session_state["_nuevo_nonce"] = nonce + 1   # limpiar el form (key nueva)
             st.success("🚀 Run lanzado. Lo seguís arriba en **Runs en curso**.")
             st.rerun()
 
@@ -820,6 +848,8 @@ if seccion == "Nuevo run":
 
 
 elif seccion == "Mejorar prompt":
+    # Nonce para limpiar el formulario tras generar (ver nota en "Nuevo run").
+    fnonce = st.session_state.get("_fix_nonce", 0)
     st.caption(f"Empresa activa: **{nombre_empresa(empresa)}**")
     st.markdown("#### ✨ Mejorar prompt")
     st.caption("Subí el/los prompt(s) actuales y el reporte de QA. El agente devuelve cada "
@@ -828,10 +858,10 @@ elif seccion == "Mejorar prompt":
     st.markdown("##### 1) Prompts actuales")
     up_prompts = st.file_uploader("Arrastrá los .md / .txt de los prompts",
                                   accept_multiple_files=True, type=["md", "txt"],
-                                  key="fix-prompts")
+                                  key=f"fix-prompts-{empresa}-{fnonce}")
     carpeta_origen = st.text_input(
         "…o pegá la ruta de una carpeta local con .md (opcional)",
-        key=f"fix-origen-{empresa}",
+        key=f"fix-origen-{empresa}-{fnonce}",
         placeholder="/home/.../prompts/prompts_actuales")
 
     st.markdown("##### 2) Reporte de QA")
@@ -840,19 +870,19 @@ elif seccion == "Mejorar prompt":
     if runs_rep:
         opciones = ["— no usar —"] + [r["label"] for r in runs_rep]
         elegido = st.selectbox("Tomá el reporte de un run anterior", opciones,
-                               key=f"fix-run-{empresa}",
+                               key=f"fix-run-{empresa}-{fnonce}",
                                help="Reusa el report.md de un QA previo de esta empresa.")
         if elegido != "— no usar —":
             sel_run = runs_rep[opciones.index(elegido) - 1]
     else:
         st.caption("Todavía no hay runs con reporte en esta empresa. Subí el reporte abajo.")
     up_reporte = st.file_uploader("…o subí el reporte (.md / .txt)", type=["md", "txt"],
-                                  key="fix-reporte")
+                                  key=f"fix-reporte-{empresa}-{fnonce}")
 
     st.markdown("##### 3) Salida")
     carpeta_destino = st.text_input(
         "Carpeta destino para guardar los corregidos (opcional)",
-        key=f"fix-destino-{empresa}",
+        key=f"fix-destino-{empresa}-{fnonce}",
         placeholder="/home/.../prompts/prompts_corregido")
 
     # ---- resolver entradas ----
@@ -889,6 +919,7 @@ elif seccion == "Mejorar prompt":
         else:
             lanzar_correccion(empresa, prompts_fix, reporte_txt, modelo, max_turnos,
                               es_sdk, api_key, motor, carpeta_destino.strip())
+            st.session_state["_fix_nonce"] = fnonce + 1   # limpiar el form (key nueva)
             st.success("✨ Corrección lanzada. La seguís arriba en **Runs en curso**.")
             st.rerun()
 
