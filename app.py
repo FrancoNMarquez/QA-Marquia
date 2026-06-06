@@ -517,7 +517,8 @@ def render_job(s):
         "corriendo": '<span class="badge badge-run">⏳ en curso</span>',
         "terminado": '<span class="badge badge-ok">✓ terminado</span>',
         "error": '<span class="badge badge-err">⛔ error</span>',
-    }[s["estado"]]
+        "cancelado": '<span class="badge badge-warn">⏹ frenado</span>',
+    }.get(s["estado"], s["estado"])
     dur = (s["finished"] or time.time()) - s["started"]
     m = s["meta"]
     rep = (s.get("saved") or {}).get("reporte") or s.get("reporte") or {}
@@ -538,6 +539,11 @@ def render_job(s):
         st.caption(f"{m.get('motor_label', '')} · {m.get('modelo', '')} · {m.get('url', '')}")
 
         if s["estado"] == "corriendo":
+            if st.button("⏹ Frenar", key=f"stop-{s['id']}",
+                         help="Detener este run (corta en el próximo paso del agente)"):
+                jobs.cancelar(s["id"])
+                st.toast("⏹ Frenando el run…")
+                st.rerun()
             with st.container(height=260):
                 render_transcript_vivo(s["transcript"])
         elif s["estado"] == "error":
@@ -663,18 +669,9 @@ st.markdown(
     'reporte + archivos corregidos. Podés lanzar varios runs en paralelo.</p></div>',
     unsafe_allow_html=True)
 
-# Panel de runs en curso/recientes (arriba del nav). Solo se muestra si hay jobs
-# en esta sesión. Auto-refresca SOLO si hay alguno corriendo; con todos
-# terminados se rendea estático para no trabar la navegación.
-_snaps_now = jobs.listar(empresa)
-if _snaps_now:
-    st.markdown("### 🔴 Runs en curso / recientes")
-    if any(s["estado"] == "corriendo" for s in _snaps_now):
-        panel_jobs_live(empresa)
-    else:
-        panel_jobs_static(empresa)
-    st.divider()
-
+# El nav va PRIMERO (posición estable): así el iframe del option_menu no se
+# re-monta cuando aparece/cambia el panel de runs, que era lo que dejaba una
+# "barra blanca" mientras un run estaba corriendo.
 seccion = option_menu(
     None, ["Nuevo run", "Mejorar prompt", "Runs anteriores"],
     icons=["play-circle-fill", "magic", "clock-history"], orientation="horizontal", key="nav",
@@ -687,6 +684,18 @@ seccion = option_menu(
                               "color": "#fff"},
         "icon": {"font-size": "0.95rem", "color": "#aab2ff"},
     })
+
+# Panel de runs en curso/recientes (debajo del nav). Solo se muestra si hay jobs
+# en esta sesión. Auto-refresca SOLO si hay alguno corriendo; con todos
+# terminados se rendea estático para no trabar la navegación.
+_snaps_now = jobs.listar(empresa)
+if _snaps_now:
+    st.markdown("### 🔴 Runs en curso / recientes")
+    if any(s["estado"] == "corriendo" for s in _snaps_now):
+        panel_jobs_live(empresa)
+    else:
+        panel_jobs_static(empresa)
+    st.divider()
 
 if seccion == "Nuevo run":
     cfg = cargar_config(empresa)
@@ -941,8 +950,26 @@ elif seccion == "Runs anteriores":
                 meta = {}
         icono = {"aprobado": "✅", "aprobado_con_observaciones": "⚠️",
                  "rechazado": "❌"}.get(meta.get("veredicto"), "•")
-        titulo = f"{icono} {meta.get('fecha', d.name)} — {meta.get('tarea', d.name)[:70]}"
+        nombre_run = meta.get("nombre") or meta.get("tarea") or d.name
+        titulo = f"{icono} {meta.get('fecha', d.name)} — {nombre_run[:70]}"
         with st.expander(titulo):
+            # Renombrar el run (guarda 'nombre' en inputs.json; no toca la carpeta).
+            rn = st.columns([4, 1])
+            nuevo_nombre = rn[0].text_input(
+                "Nombre del run", value=nombre_run, key=f"rename-{d.name}",
+                label_visibility="collapsed")
+            if rn[1].button("💾 Renombrar", key=f"rename-btn-{d.name}",
+                            use_container_width=True):
+                if nuevo_nombre.strip():
+                    meta_nuevo = dict(meta)
+                    meta_nuevo["nombre"] = nuevo_nombre.strip()
+                    inputs_f.write_text(
+                        json.dumps(meta_nuevo, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                    st.success("Nombre actualizado.")
+                    st.rerun()
+                else:
+                    st.warning("Poné un nombre.")
             st.write(f"**Webchat:** {meta.get('url', '—')}")
             st.write(f"**Modelo:** {meta.get('modelo', '—')}")
             if meta.get("uso"):

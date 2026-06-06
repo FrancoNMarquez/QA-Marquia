@@ -39,6 +39,7 @@ class Job:
         self.started = time.time()
         self.finished = None
         self.saved = None           # dict de run devuelto por el callback de persistencia
+        self.cancel = threading.Event()   # se setea para frenar el run (cooperativo)
         self._lock = threading.Lock()
 
     def snapshot(self):
@@ -70,8 +71,12 @@ def lanzar(runner, params, meta, on_done=None):
 
     def worker():
         estado, error = "terminado", None
+        gen = runner(**params)
         try:
-            for ev in runner(**params):
+            for ev in gen:
+                if job.cancel.is_set():
+                    estado = "cancelado"
+                    break
                 tipo = ev.get("tipo")
                 if tipo == "fin":
                     break
@@ -86,6 +91,12 @@ def lanzar(runner, params, meta, on_done=None):
                         job.transcript.append((tipo, ev["texto"]))
         except Exception as e:  # noqa: BLE001
             estado, error = "error", str(e)
+        finally:
+            # Cerrar el generador dispara sus `finally` (cierra Playwright, etc.).
+            try:
+                gen.close()
+            except Exception:  # noqa: BLE001
+                pass
 
         # Persistir ANTES de marcar el estado terminal: así, una vez que el estado
         # deja de ser "corriendo", `saved` ya está listo (estado terminal => persistido).
@@ -99,6 +110,17 @@ def lanzar(runner, params, meta, on_done=None):
 
     threading.Thread(target=worker, daemon=True).start()
     return job.id
+
+
+def cancelar(job_id):
+    """Pide frenar un run. Es cooperativo: el worker corta en el próximo evento
+    del runner (no mata el thread). Devuelve True si el job existía y corría."""
+    with _LOCK:
+        j = _REGISTRY.get(job_id)
+    if j is None or j.estado != "corriendo":
+        return False
+    j.cancel.set()
+    return True
 
 
 def get(job_id):
