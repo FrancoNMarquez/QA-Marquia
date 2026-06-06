@@ -76,36 +76,52 @@ class WebChatDriver:
         self._msg_selector = self.selectors.get("message")
         self._count_before = 0
         self._last_sent = ""
+        # Recursos de Playwright (None hasta start()); declarados para que stop()
+        # pueda cerrarlos aunque start() falle a mitad de camino.
+        self._pw = self.browser = self.context = self.page = None
 
     # ---- ciclo de vida ----------------------------------------------------
     def start(self):
         self._pw = sync_playwright().start()
         self.browser = self._pw.chromium.launch(headless=self.headless)
-        self.context = self.browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            ),
-        )
-        self.page = self.context.new_page()
-        self.page.goto(self.url, wait_until="domcontentloaded", timeout=self.nav_timeout)
-        self.page.wait_for_timeout(2000)
-        self._dismiss_overlays()
+        # Si CUALQUIER paso post-launch falla (p. ej. goto() a una URL caída),
+        # cerramos el navegador antes de re-lanzar para no dejarlo huérfano.
+        try:
+            self.context = self.browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+            )
+            self.page = self.context.new_page()
+            self.page.goto(self.url, wait_until="domcontentloaded", timeout=self.nav_timeout)
+            self.page.wait_for_timeout(2000)
+            self._dismiss_overlays()
 
-        if not self._input_selector:
-            self._input_selector = self._auto_input_selector()
-        if not self._msg_selector:
-            self._msg_selector = self._auto_message_selector()
+            if not self._input_selector:
+                self._input_selector = self._auto_input_selector()
+            if not self._msg_selector:
+                self._msg_selector = self._auto_message_selector()
+        except Exception:
+            self.stop()
+            raise
         return self
 
     def stop(self):
-        try:
-            self.context.close()
-            self.browser.close()
-            self._pw.stop()
-        except Exception:
-            pass
+        # Cierra cada recurso por separado (si uno falla, igual cierra los demás).
+        for attr in ("context", "browser"):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if self._pw is not None:
+            try:
+                self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
     def __enter__(self):
         return self.start()

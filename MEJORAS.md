@@ -4,7 +4,18 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
 
 ---
 
-## 🔴 Hallazgos de revisión en profundidad (2026-06-06)
+## 🔴 Hallazgos de revisión en profundidad (2026-06-06) — RESUELTOS
+
+> Ambos se arreglaron y se verificaron antes de mergear a `main`.
+
+### ~~[CRÍTICO] Fuga de Chromium/Playwright cuando falla la apertura del webchat~~ — RESUELTO
+Fix: `WebChatDriver.start()` (`engine/chat_driver.py`) envuelve los pasos post-launch en
+try/except que llama a `stop()` y re-lanza; `stop()` ahora cierra cada recurso por separado
+(context/browser/_pw) aunque alguno no exista. Verificado: `start()` contra un puerto cerrado
+lanza la excepción y `browser.is_connected()` queda en `False` (sin huérfano). Arregla los dos
+motores de una (ambos llaman a `.start()`).
+
+<details><summary>Detalle original del hallazgo</summary>
 
 ### [CRÍTICO] Fuga de Chromium/Playwright cuando falla la apertura del webchat
 - **Síntoma:** cada run que falla al abrir el webchat (URL inválida, timeout de
@@ -25,18 +36,24 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
   O mover el `page.goto` dentro de un try dentro de `start()` que cierre el navegador antes
   de re-lanzar. Aplica a ambos motores.
 
-### [ALTO] Colisión de carpeta de run con runs en paralelo (pérdida de datos)
+</details>
+
+### ~~[ALTO] Colisión de carpeta de run con runs en paralelo (pérdida de datos)~~ — RESUELTO
+Fix: `guardar_run` (`app.py`) ahora agrega un sufijo único al nombre de la carpeta — el `job
+id` (`run_id=snap["id"]`, fallback `uuid4().hex[:6]`): `f"{ts}-{base}-{sufijo}"`. Verificado
+end-to-end: la carpeta quedó `…-verificar-sufijo-3cb2be6a`. Dos runs en paralelo con igual
+slug/segundo ya no comparten carpeta.
+
+<details><summary>Detalle original del hallazgo</summary>
+
 - **Síntoma:** dos runs que terminan en el **mismo segundo** y comparten el mismo slug
   (misma URL + misma tarea, ej. lanzados desde el mismo perfil o "▶️" dos veces) escriben en
   la **misma carpeta** `runs/<empresa>/<ts>-<slug>/` y se **pisan** los archivos
   (`report.md`, `transcript.md`, `inputs.json`) → uno de los dos runs se pierde.
-- **Causa:** `guardar_run` (`app.py:296`) arma el nombre con `strftime("%Y%m%d-%H%M%S")`
-  (precisión de **segundos**) + slug, y `run_dir.mkdir(exist_ok=True)` reusa la carpeta en vez
-  de fallar. Es justo el caso que habilita el feature estrella de "varios runs en paralelo".
-- **Fix propuesto:** agregar un sufijo único al nombre de la carpeta — el `job id` (ya es un
-  `uuid4` de 8 chars) o `uuid4().hex[:6]`. Ej.: `f"{ts}-{base}-{sufijo}"`.
+- **Causa:** `guardar_run` arma el nombre con `strftime("%Y%m%d-%H%M%S")` (precisión de
+  **segundos**) + slug, y `run_dir.mkdir(exist_ok=True)` reusa la carpeta en vez de fallar.
 
-> Por estos dos hallazgos NO se mergeó a `main` en esta revisión (quedó en `Testing`).
+</details>
 
 ---
 

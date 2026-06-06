@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -288,18 +289,21 @@ def leer_uploads(uploaded, texto_pegado):
 
 
 def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, contexto,
-                uso=None, tipo="qa"):
-    """Persiste un run en runs/<empresa>/<ts>-<slug>/ y devuelve el dict del run.
+                uso=None, tipo="qa", run_id=None):
+    """Persiste un run en runs/<empresa>/<ts>-<slug>-<id>/ y devuelve el dict del run.
 
     `tipo` distingue un QA de webchat ("qa") de una corrección de prompts
-    ("correccion"); cambia solo el nombre del subdirectorio."""
+    ("correccion"); cambia solo el nombre del subdirectorio. `run_id` es un sufijo
+    único (el id del job) para que dos runs en paralelo que terminan el mismo
+    segundo con el mismo slug NO compartan carpeta y se pisen los archivos."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     if tipo == "correccion":
         base = "correccion-" + _slug(tarea)
     else:
         dom = urlparse(url).netloc or "webchat"
         base = _slug(dom + "-" + tarea)
-    run_dir = RUNS_DIR / empresa / f"{ts}-{base}"
+    sufijo = run_id or uuid4().hex[:6]
+    run_dir = RUNS_DIR / empresa / f"{ts}-{base}-{sufijo}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     archivos_final = dict(archivos)  # nombre -> contenido
@@ -337,7 +341,8 @@ def _persistir_job(job):
     tipo = m.get("tipo", "qa")
     run = guardar_run(m.get("empresa"), m.get("url", ""), m["tarea"], m["modelo"],
                       snap["transcript"], snap["archivos"], snap["reporte"],
-                      m.get("contexto") or [], snap["uso"], tipo=tipo)
+                      m.get("contexto") or [], snap["uso"], tipo=tipo,
+                      run_id=snap.get("id"))
     # Para correcciones, opcionalmente copiar los .md corregidos a una carpeta destino.
     destino = m.get("destino")
     if tipo == "correccion" and destino:
