@@ -61,7 +61,14 @@ CSS = """
 <style>
 /* ---------- tipografía y base (tema oscuro) ---------- */
 html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; }
-.block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
+/* Container central a ancho completo (sin el max-width que dejaba aire) y con
+   poco padding lateral, para que el contenido use toda la pantalla —sobre todo
+   con la barra lateral cerrada. */
+.block-container, [data-testid="stMainBlockContainer"] {
+  padding-top: 2.2rem; padding-bottom: 3rem;
+  padding-left: 1.6rem; padding-right: 1.6rem;
+  max-width: 100%;
+}
 
 /* ---------- hero ---------- */
 .hero {
