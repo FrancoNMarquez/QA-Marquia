@@ -45,10 +45,25 @@ El motor default usa la **suscripción** de Claude Code (sin API key) vía `clau
 Requiere el CLI `claude` instalado y **logueado** (credenciales en `~/.claude`). El otro motor
 usa la **API de Anthropic** (key pegada en la UI, pago por uso).
 
+`_find_claude_cli()` (en `agent_runner_sdk.py`) ubica el CLI multiplataforma: `WEBQA_CLAUDE_CLI`/
+`CLAUDE_CLI` (env override) → `shutil.which("claude")` → candidatos por SO (en Windows
+`%APPDATA%\npm\claude.cmd`, etc.). Si no lo encuentra, lanza un error claro en vez de pasarle al
+SDK una ruta POSIX inválida (bug que rompía en Windows: `claude not found at C:\...\.local\bin\claude`).
+
 ## Arquitectura
 
 **`app.py` (UI) y `engine/` están desacoplados: el engine NO importa Streamlit.** Cualquier
 consumidor puede iterar los eventos del motor.
+
+### Dos formas de uso
+- **App Streamlit (`app.py`)**: embebe un agente que conversa solo con el webchat (motor API
+  o SDK) y muestra el run en vivo.
+- **Servidor MCP (`mcp_server.py`)**: **inversión del diseño** — expone las primitivas como
+  tools MCP (`abrir_webchat`, `enviar_mensaje`, `inspeccionar_webchat`, `guardar_reporte`,
+  `cerrar_webchat`) y el **agente externo** (Claude Code/Desktop/Cursor) es el cerebro de QA.
+  Transporte stdio; no necesita API key. Reusa el engine: `driver_proxy._DriverProxy`
+  (Playwright en thread dedicado), `agent_runner.inspect_webchat` y `persistence.guardar_run`.
+  Sesiones en memoria (`_SESIONES`); cada sesión acumula su transcript para `guardar_reporte`.
 
 ### Contrato de eventos (la pieza central)
 
@@ -65,6 +80,11 @@ infra (`jobs.py`, `panel_jobs`, `render_resultados`, persistencia). Tools del ag
   interfaz**. `app.py` elige uno u otro según el toggle del sidebar (`es_sdk`).
 - `engine/chat_driver.py` — wrapper de Playwright (sync): autodetecta input/burbujas, maneja
   streaming. `SITE_DEFAULTS` trae Marquia preconfigurado.
+- `engine/driver_proxy.py` — `_DriverProxy`: corre el `WebChatDriver` (sync) en un **thread
+  dedicado** y le habla por cola. Lo usan el motor SDK y `mcp_server.py` (ambos viven en un
+  event loop asyncio, donde Playwright sync no puede correr directo).
+- `engine/persistence.py` — `_slug` + `guardar_run` (funciones puras, sin Streamlit): escriben
+  `runs/<empresa>/<ts>-slug/`. Las comparten `app.py` y `mcp_server.py`.
 - `engine/prompt_fixer.py` — runner **sin webchat** (sección "Mejorar prompt"): toma
   prompt(s) + reporte de QA y devuelve cada prompt corregido. Mismo contrato de eventos +
   `run_stream_api`/`run_stream_sdk`, así reusa toda la infra. Reusa el `finalizar` como

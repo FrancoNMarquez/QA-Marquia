@@ -21,13 +21,14 @@ Detalles técnicos:
 from __future__ import annotations
 
 import asyncio
+import os
 import queue
 import shutil
 import threading
 from pathlib import Path
 
 from .agent_runner import CONTEXTO_HEADER, SYSTEM_BASE
-from .chat_driver import WebChatDriver
+from .driver_proxy import _DriverProxy
 
 SERVER = "webqa"
 NUESTRAS_TOOLS = [
@@ -37,68 +38,45 @@ NUESTRAS_TOOLS = [
 ]
 
 
-# ---- driver en thread dedicado (Playwright sync necesita un solo thread) ----
-class _DriverProxy:
-    def __init__(self, url, headless, selectors):
-        self._url, self._headless, self._sel = url, headless, selectors or {}
-        self._in: queue.Queue = queue.Queue()
-        self._ready = threading.Event()
-        self._err = None
-        self._info = {}
-        self._t = threading.Thread(target=self._run, daemon=True)
+def _find_claude_cli():
+    """Ubica el CLI `claude` de forma multiplataforma.
 
-    def start(self):
-        self._t.start()
-        self._ready.wait(timeout=60)
-        if self._err:
-            raise RuntimeError(self._err)
-        return self._info
+    Orden: override por env (WEBQA_CLAUDE_CLI / CLAUDE_CLI) → `shutil.which`
+    (encuentra claude.cmd/.exe si está en PATH) → candidatos por plataforma.
+    Devuelve None si no encuentra nada (el motor emite un error claro).
+    """
+    override = os.environ.get("WEBQA_CLAUDE_CLI") or os.environ.get("CLAUDE_CLI")
+    if override and Path(override).exists():
+        return override
 
-    def _run(self):
+    found = shutil.which("claude")
+    if found:
+        return found
+
+    home = Path.home()
+    if os.name == "nt":  # Windows
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        candidatos = [
+            Path(appdata) / "npm" / "claude.cmd",
+            Path(appdata) / "npm" / "claude.exe",
+            Path(localappdata) / "Programs" / "claude" / "claude.exe",
+            home / "AppData" / "Local" / "Programs" / "claude" / "claude.exe",
+            home / ".local" / "bin" / "claude.exe",
+        ]
+    else:  # macOS / Linux
+        candidatos = [
+            home / ".local" / "bin" / "claude",
+            Path("/usr/local/bin/claude"),
+            Path("/opt/homebrew/bin/claude"),
+        ]
+    for c in candidatos:
         try:
-            d = WebChatDriver(self._url, headless=self._headless, selectors=self._sel).start()
-        except Exception as e:  # noqa: BLE001
-            self._err = str(e)
-            self._ready.set()
-            return
-        self._info = {"input": d._input_selector, "message": d._msg_selector}
-        self._ready.set()
-        while True:
-            cmd = self._in.get()
-            if cmd is None:
-                break
-            op, arg, res = cmd
-            try:
-                if op == "send":
-                    d.send(arg)
-                    res.put(("ok", d.read_reply()))
-                elif op == "read":
-                    res.put(("ok", d.read_reply(timeout=arg)))
-                else:
-                    res.put(("ok", None))
-            except Exception as e:  # noqa: BLE001
-                res.put(("err", str(e)))
-        try:
-            d.stop()
+            if c.exists():
+                return str(c)
         except Exception:  # noqa: BLE001
-            pass
-
-    def _call(self, op, arg=None):
-        res: queue.Queue = queue.Queue()
-        self._in.put((op, arg, res))
-        status, val = res.get()
-        if status == "err":
-            raise RuntimeError(val)
-        return val
-
-    def send(self, text):
-        return self._call("send", text)
-
-    def read_initial(self):
-        return self._call("read", 10)
-
-    def stop(self):
-        self._in.put(None)
+            continue
+    return None
 
 
 def _texto(reply):
@@ -193,7 +171,14 @@ async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selector
     system += ("\n\nIMPORTANTE: usá ÚNICAMENTE las tools enviar_mensaje, generar_archivo y "
                "finalizar. No intentes usar otras herramientas. Cerrá siempre con `finalizar`.")
 
-    cli = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+    cli = _find_claude_cli()
+    if not cli:
+        raise RuntimeError(
+            "Claude Code no encontrado. Instalá y logueá el CLI `claude`, abrí una "
+            "terminal NUEVA y verificá que `claude` esté en el PATH (probá `where claude` "
+            "en Windows o `which claude` en macOS/Linux); o seteá WEBQA_CLAUDE_CLI con la "
+            "ruta al ejecutable. Alternativa sin CLI: usá el motor de API key de Anthropic."
+        )
     options = ClaudeAgentOptions(
         system_prompt=system,
         mcp_servers={SERVER: server},

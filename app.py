@@ -30,6 +30,7 @@ from engine import agent_runner_sdk as eng_sdk
 from engine import jobs
 from engine import prompt_fixer as eng_fix
 from engine.agent_runner import inspect_webchat
+from engine.persistence import _slug, guardar_run
 from engine.reporting import construir_reporte_md, construir_transcript_md
 
 try:
@@ -161,12 +162,6 @@ hr, [data-testid="stDivider"] {
 st.markdown(CSS, unsafe_allow_html=True)
 
 
-# ----------------------------- helpers -------------------------------------
-def _slug(texto, n=40):
-    s = re.sub(r"[^a-z0-9]+", "-", (texto or "").lower()).strip("-")
-    return (s[:n] or "run").rstrip("-")
-
-
 # ----------------------------- empresas ------------------------------------
 def cargar_config(empresa):
     """Lee empresas/<slug>/config.json; devuelve {} si no existe."""
@@ -286,52 +281,6 @@ def leer_uploads(uploaded, texto_pegado):
     if texto_pegado and texto_pegado.strip():
         contexto.append({"nombre": "contexto_pegado.txt", "contenido": texto_pegado})
     return contexto
-
-
-def guardar_run(empresa, url, tarea, modelo, transcript, archivos, reporte, contexto,
-                uso=None, tipo="qa", run_id=None):
-    """Persiste un run en runs/<empresa>/<ts>-<slug>-<id>/ y devuelve el dict del run.
-
-    `tipo` distingue un QA de webchat ("qa") de una corrección de prompts
-    ("correccion"); cambia solo el nombre del subdirectorio. `run_id` es un sufijo
-    único (el id del job) para que dos runs en paralelo que terminan el mismo
-    segundo con el mismo slug NO compartan carpeta y se pisen los archivos."""
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    if tipo == "correccion":
-        base = "correccion-" + _slug(tarea)
-    else:
-        dom = urlparse(url).netloc or "webchat"
-        base = _slug(dom + "-" + tarea)
-    sufijo = run_id or uuid4().hex[:6]
-    run_dir = RUNS_DIR / empresa / f"{ts}-{base}-{sufijo}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    archivos_final = dict(archivos)  # nombre -> contenido
-    if reporte:
-        reporte_md = construir_reporte_md(reporte, url, tarea, modelo)
-        if uso:
-            reporte_md = reporte_md.rstrip() + "\n\n" + formatear_uso(uso) + "\n"
-        archivos_final.setdefault("report.md", reporte_md)
-    archivos_final["transcript.md"] = construir_transcript_md(transcript, url, tarea)
-
-    for nombre, contenido in archivos_final.items():
-        (run_dir / nombre).write_text(contenido, encoding="utf-8")
-
-    # Copia del contexto que se le dio al agente.
-    if contexto:
-        ctx_dir = run_dir / "contexto"
-        ctx_dir.mkdir(exist_ok=True)
-        for c in contexto:
-            (ctx_dir / c["nombre"]).write_text(c["contenido"], encoding="utf-8")
-
-    (run_dir / "inputs.json").write_text(json.dumps(
-        {"empresa": empresa, "url": url, "tarea": tarea, "modelo": modelo, "fecha": ts,
-         "tipo": tipo, "veredicto": (reporte or {}).get("veredicto"), "uso": uso},
-        ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return {"dir": str(run_dir), "url": url, "tarea": tarea, "modelo": modelo,
-            "reporte": reporte, "archivos": archivos_final, "transcript": transcript,
-            "uso": uso}
 
 
 def _persistir_job(job):
