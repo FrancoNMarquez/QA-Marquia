@@ -4,6 +4,42 @@ Ordenado por prioridad. Se va tachando a medida que se implementa.
 
 ---
 
+## 🔴 Hallazgos de revisión en profundidad (2026-06-06)
+
+### [CRÍTICO] Fuga de Chromium/Playwright cuando falla la apertura del webchat
+- **Síntoma:** cada run que falla al abrir el webchat (URL inválida, timeout de
+  navegación, sitio caído) deja un proceso **chromium + node de Playwright colgado**
+  que no se cierra hasta matar el servidor. En una app que justamente sirve para testear
+  webchats (donde fallar al abrir es común), se acumulan y terminan comiéndose la RAM /
+  ralentizando la máquina del equipo, que corre el server por horas.
+- **Causa:** `WebChatDriver.start()` lanza el navegador y *después* hace `page.goto(...)`,
+  que es lo que tira la excepción. El patrón de los dos motores es
+  `driver = WebChatDriver(...).start()`: si `start()` revienta, la asignación nunca se
+  completa, así que la variable queda en `None`/sin asignar y el `finally` que llama a
+  `driver.stop()` **se saltea** → el navegador ya lanzado queda huérfano.
+  - `engine/agent_runner.py:177` (`driver = None`) + `:186` (`.start()`) + `:280` (`if driver is not None: driver.stop()`).
+  - `engine/agent_runner_sdk.py:59` (`d = WebChatDriver(...).start()`); en el `except` setea
+    `self._err` y `return` sin cerrar el navegador (`d.stop()` en `:82` solo corre en el camino feliz).
+- **Fix propuesto:** separar construcción de arranque y envolver el arranque en try/finally:
+  `driver = WebChatDriver(...)` ; `try: driver.start()` ; y en error `driver.stop()`.
+  O mover el `page.goto` dentro de un try dentro de `start()` que cierre el navegador antes
+  de re-lanzar. Aplica a ambos motores.
+
+### [ALTO] Colisión de carpeta de run con runs en paralelo (pérdida de datos)
+- **Síntoma:** dos runs que terminan en el **mismo segundo** y comparten el mismo slug
+  (misma URL + misma tarea, ej. lanzados desde el mismo perfil o "▶️" dos veces) escriben en
+  la **misma carpeta** `runs/<empresa>/<ts>-<slug>/` y se **pisan** los archivos
+  (`report.md`, `transcript.md`, `inputs.json`) → uno de los dos runs se pierde.
+- **Causa:** `guardar_run` (`app.py:296`) arma el nombre con `strftime("%Y%m%d-%H%M%S")`
+  (precisión de **segundos**) + slug, y `run_dir.mkdir(exist_ok=True)` reusa la carpeta en vez
+  de fallar. Es justo el caso que habilita el feature estrella de "varios runs en paralelo".
+- **Fix propuesto:** agregar un sufijo único al nombre de la carpeta — el `job id` (ya es un
+  `uuid4` de 8 chars) o `uuid4().hex[:6]`. Ej.: `f"{ts}-{base}-{sufijo}"`.
+
+> Por estos dos hallazgos NO se mergeó a `main` en esta revisión (quedó en `Testing`).
+
+---
+
 ## 🟣 Pendiente (próximo)
 
 ### ~~[ALTA] Feature: "Corregir prompts" a partir del reporte de QA~~ — HECHO (sección "Mejorar prompt")
