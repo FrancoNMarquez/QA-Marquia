@@ -66,7 +66,7 @@ html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', system-ui, sans-s
    con la barra lateral cerrada. */
 .block-container, [data-testid="stMainBlockContainer"] {
   padding-top: 2.2rem; padding-bottom: 3rem;
-  padding-left: 1.6rem; padding-right: 1.6rem;
+  padding-left: 2.5rem; padding-right: 2.5rem;
   max-width: 100%;
 }
 
@@ -428,7 +428,9 @@ def listar_runs_con_reporte(empresa):
                 meta = json.loads(f.read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001
                 meta = {}
-        label = f"{meta.get('fecha', d.name)} — {(meta.get('tarea') or d.name)[:50]}"
+        # Usar el nombre renombrado si existe (mismo criterio que "Runs anteriores").
+        nombre_run = meta.get("nombre") or meta.get("tarea") or d.name
+        label = f"{meta.get('fecha', d.name)} — {nombre_run[:50]}"
         out.append({"label": label, "path": str(rep)})
     return out
 
