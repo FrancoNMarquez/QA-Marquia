@@ -199,8 +199,13 @@ async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selector
         # `can_use_tool` exige modo streaming: el prompt va como AsyncIterable.
         yield {"type": "user", "message": {"role": "user", "content": prompt}}
 
+    # Mantenemos una referencia al async generator para poder CERRARLO a mano
+    # (aclose) en el finally. Si solo hiciéramos `break`, queda suspendido y su
+    # subproceso (`claude` CLI) lo finaliza el GC más tarde, ya con el event loop
+    # cerrado → "Event loop is closed" / "asynchronous generator is already running".
+    agen = query(prompt=_prompt_stream(), options=options)
     try:
-        async for message in query(prompt=_prompt_stream(), options=options):
+        async for message in agen:
             if isinstance(message, AssistantMessage):
                 txt = "".join(b.text for b in message.content
                               if isinstance(b, TextBlock)).strip()
@@ -247,10 +252,15 @@ async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selector
                     pass
                 break
     finally:
+        # Cerrar el generador del SDK (y su subproceso) MIENTRAS el loop sigue vivo.
+        try:
+            await agen.aclose()
+        except Exception:  # noqa: BLE001
+            pass
         await loop.run_in_executor(None, proxy.stop)
         # Panel de uso — JUSTO ANTES de 'fin'. El 'fin' lo agrega el worker en
-        # su finally DESPUÉS de que asyncio.run(_amain(...)) retorna, así que
-        # este q.put llega antes. No rompemos el run si esto falla.
+        # su finally DESPUÉS de que el loop de _amain retorna, así que este q.put
+        # llega antes. No rompemos el run si esto falla.
         try:
             q.put(uso_evento)
         except Exception:  # noqa: BLE001
@@ -264,12 +274,28 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=None,
     q: queue.Queue = queue.Queue()
 
     def worker():
+        # Loop propio (en vez de asyncio.run) para poder drenar async-gens y darle
+        # un tick a los transportes de subproceso ANTES de cerrar el loop. Así se
+        # evita el ruido "Event loop is closed" del cierre del CLI `claude`.
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            asyncio.run(_amain(q, url, tarea, contexto or [], modelo,
-                               max_turnos, headless, selectors or {}))
+            loop.run_until_complete(_amain(q, url, tarea, contexto or [], modelo,
+                                           max_turnos, headless, selectors or {}))
         except Exception as e:  # noqa: BLE001
             q.put({"tipo": "error", "texto": f"Error en el motor SDK: {e}"})
         finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                # Un par de ticks para que los pipes del subproceso se cierren
+                # mientras el loop sigue vivo.
+                loop.run_until_complete(asyncio.sleep(0.2))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
             q.put({"tipo": "fin"})
 
     threading.Thread(target=worker, daemon=True).start()
