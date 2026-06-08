@@ -624,9 +624,11 @@ with st.sidebar:
              "Opus es más capaz; Haiku el más rápido/barato.")
     max_turnos = st.slider(
         "Máx. de turnos", 4, 30, 12,
-        help="Límite de idas y vueltas con el webchat antes de cortar (freno de "
-             "seguridad). 12-20 alcanza para registro + trivia. Con la API es ≈1:1 con "
-             "los mensajes; con Claude Code cada intercambio usa varios turnos internos.")
+        help="Freno de seguridad, no un tope exacto: el run puede mostrar más turnos "
+             "que el valor elegido. Con la API ≈ mensajes al webchat, +2 de margen para "
+             "cerrar el reporte. Con Claude Code el límite interno es ~3× este valor y el "
+             "panel cuenta los turnos internos del SDK (varios por cada mensaje), así que "
+             "verás un número bastante mayor al que pongas. 12-20 alcanza para registro + trivia.")
     headless = st.checkbox(
         "Headless (navegador invisible)", value=True,
         help="Navegador invisible (default) vs. ventana visible para debuggear. En un "
