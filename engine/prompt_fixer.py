@@ -28,7 +28,8 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
-from .reporting import costo_estimado
+from .agent_runner import _rolling_cache
+from .reporting import costo_detallado
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
@@ -144,7 +145,7 @@ def run_stream_api(prompts, reporte="", api_key=None, modelo=DEFAULT_MODEL,
         return
 
     _t0 = time.monotonic()
-    uso_tokens_in = uso_tokens_out = uso_turnos = 0
+    uso_base_in = uso_cache_write = uso_cache_read = uso_tokens_out = uso_turnos = 0
     try:
         system = [
             {"type": "text", "text": SYSTEM_FIXER},
@@ -165,6 +166,7 @@ def run_stream_api(prompts, reporte="", api_key=None, modelo=DEFAULT_MODEL,
                "texto": f"Corrigiendo {len(prompts)} prompt(s) con el reporte de QA…"}
 
         for _ in range(max_turnos + 2):
+            _rolling_cache(messages)  # cachea el historial: relee a ~10% en vez de full
             try:
                 resp = client.messages.create(
                     model=modelo, max_tokens=max_tokens,
@@ -178,9 +180,9 @@ def run_stream_api(prompts, reporte="", api_key=None, modelo=DEFAULT_MODEL,
                 u = getattr(resp, "usage", None)
                 if u is not None:
                     uso_turnos += 1
-                    uso_tokens_in += (getattr(u, "input_tokens", 0) or 0)
-                    uso_tokens_in += (getattr(u, "cache_creation_input_tokens", 0) or 0)
-                    uso_tokens_in += (getattr(u, "cache_read_input_tokens", 0) or 0)
+                    uso_base_in += (getattr(u, "input_tokens", 0) or 0)
+                    uso_cache_write += (getattr(u, "cache_creation_input_tokens", 0) or 0)
+                    uso_cache_read += (getattr(u, "cache_read_input_tokens", 0) or 0)
                     uso_tokens_out += (getattr(u, "output_tokens", 0) or 0)
             except Exception:  # noqa: BLE001
                 pass
@@ -229,13 +231,16 @@ def run_stream_api(prompts, reporte="", api_key=None, modelo=DEFAULT_MODEL,
         except Exception:  # noqa: BLE001
             duracion_s = None
         try:
-            costo_usd = costo_estimado(uso_tokens_in, uso_tokens_out, modelo)
+            costo_usd = costo_detallado(uso_base_in, uso_cache_write,
+                                        uso_cache_read, uso_tokens_out, modelo)
         except Exception:  # noqa: BLE001
             costo_usd = None
         yield {
             "tipo": "uso",
-            "tokens_in": uso_tokens_in,
+            "tokens_in": uso_base_in + uso_cache_write + uso_cache_read,
             "tokens_out": uso_tokens_out,
+            "tokens_cache_write": uso_cache_write,
+            "tokens_cache_read": uso_cache_read,
             "turnos": uso_turnos,
             "duracion_s": duracion_s,
             "costo_usd": costo_usd,

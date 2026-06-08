@@ -35,6 +35,14 @@ TARIFAS = {
 # Fallback si el modelo no matchea ninguna tarifa conocida.
 _TARIFA_DEFAULT = TARIFAS["claude-sonnet-4-6"]
 
+# Multiplicadores sobre la tarifa de INPUT para los tiers de prompt caching
+# (caché efímera, TTL 5 min). Confirmados con la skill `claude-api`:
+#   - escritura de caché (cache_creation_input_tokens): 1.25× la tarifa de input
+#   - lectura de caché   (cache_read_input_tokens):     0.10× la tarifa de input
+#   - input sin cachear  (input_tokens):                1.00× (tarifa full)
+CACHE_WRITE_MULT = 1.25
+CACHE_READ_MULT = 0.10
+
 
 def tarifa_modelo(modelo):
     """Devuelve {'in': ..., 'out': ...} (USD/1M) para el modelo dado.
@@ -57,11 +65,34 @@ def tarifa_modelo(modelo):
 
 
 def costo_estimado(tokens_in, tokens_out, modelo):
-    """Costo USD estimado para una cantidad de tokens in/out y un modelo."""
+    """Costo USD estimado tratando TODO `tokens_in` a tarifa full (sobreestima
+    si hubo cache hits). Se mantiene por compatibilidad; preferí `costo_detallado`
+    cuando tengas el desglose de caché."""
     t = tarifa_modelo(modelo)
     ti = tokens_in or 0
     to = tokens_out or 0
     return (ti / 1_000_000) * t["in"] + (to / 1_000_000) * t["out"]
+
+
+def costo_detallado(base_in, cache_write, cache_read, tokens_out, modelo):
+    """Costo USD real aplicando la tarifa correcta a cada tier de input.
+
+    base_in     → input_tokens (sin cachear), 1.00× tarifa input
+    cache_write → cache_creation_input_tokens, 1.25× tarifa input
+    cache_read  → cache_read_input_tokens,     0.10× tarifa input
+    tokens_out  → output_tokens, tarifa output
+    """
+    t = tarifa_modelo(modelo)
+    bi = base_in or 0
+    cw = cache_write or 0
+    cr = cache_read or 0
+    to = tokens_out or 0
+    return (
+        (bi / 1_000_000) * t["in"]
+        + (cw / 1_000_000) * t["in"] * CACHE_WRITE_MULT
+        + (cr / 1_000_000) * t["in"] * CACHE_READ_MULT
+        + (to / 1_000_000) * t["out"]
+    )
 
 
 def _fmt_tokens(n):
@@ -92,8 +123,18 @@ def formatear_uso(uso):
     pct = uso.get("suscripcion_pct")
     reset = uso.get("suscripcion_reset")
 
+    cw = uso.get("tokens_cache_write")
+    cr = uso.get("tokens_cache_read")
+
     lineas = ["## 📊 Uso del run", ""]
     lineas.append(f"- **Tokens:** {_fmt_tokens(tin)} in / {_fmt_tokens(tout)} out")
+    # Desglose de caché (solo si el motor lo reportó): muestra cuánto del input
+    # se leyó de caché barato vs se escribió/pagó full.
+    if cw is not None or cr is not None:
+        lineas.append(
+            f"- **Caché:** {_fmt_tokens(cr)} leídos (0.1×) · "
+            f"{_fmt_tokens(cw)} escritos (1.25×)"
+        )
     lineas.append(f"- **Turnos:** {turnos if turnos is not None else '—'}")
 
     if dur is not None:

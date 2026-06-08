@@ -422,6 +422,14 @@ def render_uso(uso):
     dur = uso.get("duracion_s")
     c4.metric("Duración", f"{dur:.0f} s" if dur else "—")
 
+    cw = uso.get("tokens_cache_write")
+    cr = uso.get("tokens_cache_read")
+    if cw is not None or cr is not None:
+        st.caption(
+            f"🗄️ Caché: **{_fmt_tokens(cr)}** leídos (0.1×) · "
+            f"**{_fmt_tokens(cw)}** escritos (1.25×)"
+        )
+
     costo = uso.get("costo_usd")
     if costo is not None:
         st.caption(f"💵 Costo equiv.: **US${costo:.4f}**")
