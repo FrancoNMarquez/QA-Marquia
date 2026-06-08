@@ -30,6 +30,47 @@ Para abrirla desde el menú de aplicaciones (sin ni siquiera entrar a la carpeta
 
 > ¿Preferís instalarla a mano paso a paso? Seguí la sección de abajo.
 
+## 🔌 Usar como MCP (desde agentes)
+
+Además de la app Streamlit, el proyecto expone un **servidor MCP** (`mcp_server.py`) para
+que **cualquier agente** (Claude Code, Claude Desktop, Cursor…) testee webchats con sus
+propias tools. Acá el agente externo es el "cerebro" de QA: abre el webchat, conversa y deja
+el reporte. **No necesita API key** (la pone el agente que lo usa) — solo Playwright +
+chromium del venv.
+
+Tools que expone: `abrir_webchat`, `enviar_mensaje`, `inspeccionar_webchat`,
+`guardar_reporte` (guarda en `runs/<empresa>/`, default empresa `MCP`) y `cerrar_webchat`.
+
+Primero instalá las dependencias (sección de abajo). Después registralo (usá **rutas
+absolutas**):
+
+### Claude Code
+```bash
+# macOS/Linux
+claude mcp add webchat-qa -- /ABS/webchat-qa/venv/bin/python /ABS/webchat-qa/mcp_server.py
+# Windows
+claude mcp add webchat-qa -- C:\ABS\webchat-qa\venv\Scripts\python.exe C:\ABS\webchat-qa\mcp_server.py
+```
+
+### `.mcp.json` (proyecto) o config de Claude Desktop
+```json
+{
+  "mcpServers": {
+    "webchat-qa": {
+      "command": "/ABS/webchat-qa/venv/bin/python",
+      "args": ["/ABS/webchat-qa/mcp_server.py"],
+      "env": { "WEBQA_HEADLESS": "true", "WEBQA_EMPRESA": "MCP" }
+    }
+  }
+}
+```
+
+> En Claude Desktop el archivo es `claude_desktop_config.json` (mismo formato). Variables
+> opcionales: `WEBQA_HEADLESS` (`true`/`false`) y `WEBQA_EMPRESA` (workspace de los runs).
+
+Después, pedile al agente algo como: *"usá webchat-qa para testear `<link>` (hacé registro y
+trivia) y guardá el reporte"*.
+
 ## Instalación (manual)
 
 > Funciona en **Windows, macOS y Linux** (no hace falta Linux). Requiere **Python 3.10+**.
@@ -140,11 +181,14 @@ los selectores CSS del campo de texto y de las burbujas.
 
 ```
 app.py              UI Streamlit (selector de empresa, motores, panel de uso)
+mcp_server.py       servidor MCP (stdio): expone las tools de QA a agentes externos
 engine/
   chat_driver.py        wrapper de Playwright (auto-detección, streaming)
+  driver_proxy.py       corre el driver (sync) en un thread dedicado (lo usan SDK y MCP)
   agent_runner.py       motor con API de Anthropic (generador de eventos)
   agent_runner_sdk.py   motor con Claude Agent SDK (suscripción Claude Code), misma interfaz
   jobs.py               gestor de runs en paralelo (cada run en un thread de fondo)
+  persistence.py        guarda runs en runs/<empresa>/ (lo usan app y MCP)
   reporting.py          arma report.md / transcript.md + tarifas y panel de uso
 empresas/<empresa>/
   config.json           defaults por empresa (url, tarea, selectores)

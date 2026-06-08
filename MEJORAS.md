@@ -183,8 +183,17 @@ Playwright): pura transformación de documentos (prompt + reporte → prompt cor
   contexto, selectores, modelo, max_turnos, headless). "💾 Guardar perfil" en Nuevo run;
   lista "⭐ Perfiles guardados" con "▶️" (lanza el perfil como job — se pueden lanzar varios
   y corren en paralelo) y "🗑️". El motor/API key salen del sidebar, no se guardan en el perfil.
-- Las otras lecturas de "subagentes" (delegación con AgentDefinition / exponer como MCP)
-  quedaron descartadas por ahora.
+- Las otras lecturas de "subagentes" (delegación con AgentDefinition) quedan descartadas por ahora.
+
+### Exponer como MCP — HECHO (jun 2026, revierte la decisión previa)
+- `mcp_server.py` (raíz): servidor MCP **stdio** que invierte el diseño — el agente externo
+  (Claude Code/Desktop/Cursor) es el cerebro de QA. Tools: `abrir_webchat`, `enviar_mensaje`,
+  `inspeccionar_webchat`, `guardar_reporte` (a `runs/<empresa>/`, default `MCP`), `cerrar_webchat`.
+  Sesiones en memoria (`_SESIONES`), cada una acumula su transcript.
+- Reuso del engine: se extrajo `_DriverProxy` → `engine/driver_proxy.py` (lo comparten el motor
+  SDK y el MCP) y `_slug`/`guardar_run` → `engine/persistence.py` (los comparten `app.py` y el MCP).
+- No necesita API key (la pone el agente externo); solo Playwright + chromium del venv.
+- Registro y ejemplo de `.mcp.json` documentados en el README. La app Streamlit queda intacta.
 
 ---
 

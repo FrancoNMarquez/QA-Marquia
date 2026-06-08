@@ -23,9 +23,55 @@ import time
 from anthropic import Anthropic
 
 from .chat_driver import WebChatDriver
-from .reporting import costo_estimado
+from .reporting import costo_detallado
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+
+# Topes de longitud (defensa contra outliers que inflan el contexto; generosos
+# a propósito para no degradar la evaluación del QA).
+MAX_REPLY_CHARS = 6000       # respuesta del webchat que se guarda en el tool_result
+MAX_CONTEXTO_CHARS = 100_000  # bloque total de contexto cacheado en el system
+
+
+def _truncar(texto, limite):
+    """Recorta `texto` a `limite` chars dejando un marcador con lo descartado."""
+    if texto is None:
+        return ""
+    if len(texto) <= limite:
+        return texto
+    descartados = len(texto) - limite
+    return texto[:limite] + f"\n…[recortado {descartados} chars]"
+
+
+def _rolling_cache(messages):
+    """Mueve un único cache breakpoint al último bloque cacheable del historial.
+
+    Strippea breakpoints viejos del historial para mantener solo 1 (el bloque
+    `system` aporta el otro → 2 totales, bajo el límite de 4 de Anthropic). Así,
+    en cada turno, el prefijo cacheado se extiende para incluir la conversación
+    previa y se relee a ~10% en vez de re-cobrarse full.
+
+    Los mensajes 'assistant' (content = resp.content, objetos del SDK) se ignoran
+    con el guard isinstance(blk, dict): solo cacheamos bloques que construimos
+    nosotros (user: string inicial/nudge, o lista de tool_result dicts).
+    """
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list):
+            for blk in c:
+                if isinstance(blk, dict):
+                    blk.pop("cache_control", None)
+    for m in reversed(messages):
+        c = m.get("content")
+        if isinstance(c, str):
+            m["content"] = [{"type": "text", "text": c,
+                             "cache_control": {"type": "ephemeral"}}]
+            return
+        if isinstance(c, list) and c:
+            for blk in reversed(c):
+                if isinstance(blk, dict):
+                    blk["cache_control"] = {"type": "ephemeral"}
+                    return
 
 SYSTEM_BASE = """\
 Sos un agente de QA experto en agentes conversacionales (webchats). Te conectás a \
@@ -128,9 +174,10 @@ def _build_system(tarea, contexto):
         for c in contexto:
             partes.append(f"\n===== {c['nombre']} =====\n{c['contenido']}\n")
         # Bloque grande de contexto, cacheado para no re-cobrar tokens en cada turno.
+        # Cap defensivo: un archivo gigante se paga full la 1ª vez (creación de caché).
         blocks.append({
             "type": "text",
-            "text": "".join(partes),
+            "text": _truncar("".join(partes), MAX_CONTEXTO_CHARS),
             "cache_control": {"type": "ephemeral"},
         })
     else:
@@ -178,7 +225,9 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=DEFAULT_MODEL,
     # Acumuladores de uso (try/except defensivos más abajo: si algo falla,
     # igual se emite 'fin').
     _t0 = time.monotonic()
-    uso_tokens_in = 0
+    uso_base_in = 0      # input_tokens sin cachear (1.00×)
+    uso_cache_write = 0  # cache_creation_input_tokens (1.25×)
+    uso_cache_read = 0   # cache_read_input_tokens (0.10×)
     uso_tokens_out = 0
     uso_turnos = 0
     try:
@@ -206,6 +255,7 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=DEFAULT_MODEL,
         }]
 
         for _ in range(max_turnos + 2):
+            _rolling_cache(messages)  # cachea el historial: relee a ~10% en vez de full
             try:
                 resp = client.messages.create(
                     model=modelo, max_tokens=max_tokens,
@@ -215,14 +265,15 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=DEFAULT_MODEL,
                 yield {"tipo": "error", "texto": f"Error llamando a la API: {e}"}
                 break
 
-            # Acumular uso de este turno (defensivo: la forma de usage puede variar).
+            # Acumular uso de este turno, separado por tier de caché para costear
+            # bien (defensivo: la forma de usage puede variar).
             try:
                 u = getattr(resp, "usage", None)
                 if u is not None:
                     uso_turnos += 1
-                    uso_tokens_in += (getattr(u, "input_tokens", 0) or 0)
-                    uso_tokens_in += (getattr(u, "cache_creation_input_tokens", 0) or 0)
-                    uso_tokens_in += (getattr(u, "cache_read_input_tokens", 0) or 0)
+                    uso_base_in += (getattr(u, "input_tokens", 0) or 0)
+                    uso_cache_write += (getattr(u, "cache_creation_input_tokens", 0) or 0)
+                    uso_cache_read += (getattr(u, "cache_read_input_tokens", 0) or 0)
                     uso_tokens_out += (getattr(u, "output_tokens", 0) or 0)
             except Exception:  # noqa: BLE001
                 pass
@@ -250,9 +301,9 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=DEFAULT_MODEL,
                     yield {"tipo": "tester", "texto": msg}
                     driver.send(msg)
                     reply = driver.read_reply()
-                    yield {"tipo": "agente", "texto": reply}
+                    yield {"tipo": "agente", "texto": reply}  # UI muestra el texto completo
                     results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                    "content": reply})
+                                    "content": _truncar(reply, MAX_REPLY_CHARS)})
                 elif tu.name == "generar_archivo":
                     nombre = tu.input.get("nombre", "archivo.txt")
                     contenido = tu.input.get("contenido", "")
@@ -286,13 +337,16 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=DEFAULT_MODEL,
         except Exception:  # noqa: BLE001
             duracion_s = None
         try:
-            costo_usd = costo_estimado(uso_tokens_in, uso_tokens_out, modelo)
+            costo_usd = costo_detallado(uso_base_in, uso_cache_write,
+                                        uso_cache_read, uso_tokens_out, modelo)
         except Exception:  # noqa: BLE001
             costo_usd = None
         yield {
             "tipo": "uso",
-            "tokens_in": uso_tokens_in,
+            "tokens_in": uso_base_in + uso_cache_write + uso_cache_read,  # total para el panel
             "tokens_out": uso_tokens_out,
+            "tokens_cache_write": uso_cache_write,
+            "tokens_cache_read": uso_cache_read,
             "turnos": uso_turnos,
             "duracion_s": duracion_s,
             "costo_usd": costo_usd,
