@@ -25,6 +25,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 from pathlib import Path
 
 from .agent_runner import CONTEXTO_HEADER, SYSTEM_BASE
@@ -253,11 +254,18 @@ async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selector
                 break
     finally:
         # Cerrar el generador del SDK (y su subproceso) MIENTRAS el loop sigue vivo.
+        # Captura BaseException: bajo cancelación, aclose puede re-lanzar
+        # CancelledError; no debe impedir que frenemos el driver de Playwright.
         try:
             await agen.aclose()
+        except BaseException:  # noqa: BLE001
+            pass
+        # proxy.stop() solo encola la señal de cierre (no bloquea ni await-ea), así
+        # que corre seguro aunque la tarea esté siendo cancelada.
+        try:
+            proxy.stop()
         except Exception:  # noqa: BLE001
             pass
-        await loop.run_in_executor(None, proxy.stop)
         # Panel de uso — JUSTO ANTES de 'fin'. El 'fin' lo agrega el worker en
         # su finally DESPUÉS de que el loop de _amain retorna, así que este q.put
         # llega antes. No rompemos el run si esto falla.
@@ -268,10 +276,23 @@ async def _amain(q, url, tarea, contexto, modelo, max_turnos, headless, selector
 
 
 def run_stream(url, tarea, contexto=None, api_key=None, modelo=None,
-               max_turnos=12, headless=True, selectors=None, **_):
+               max_turnos=12, headless=True, selectors=None, cancel=None,
+               timeout_s=None, **_):
     """Mismo contrato que agent_runner.run_stream, pero usando el Agent SDK
-    (suscripción de Claude Code). `api_key` se ignora a propósito."""
+    (suscripción de Claude Code). `api_key` se ignora a propósito.
+
+    `cancel` es un threading.Event opcional (lo pasa jobs.py): cuando se setea,
+    un watchdog cancela la tarea async para que el run termine de verdad — sin
+    esto, el agente del SDK seguía corriendo en su thread aunque la UI dejara de
+    leer. `timeout_s` es el tope de pared: pasado ese tiempo el run se autotermina
+    aunque nadie lo cancele (evita el 'loop infinito' que obligaba a reiniciar la
+    app). Si no se pasa, se deriva de max_turnos.
+    """
     q: queue.Queue = queue.Queue()
+    if timeout_s is None:
+        # ~45 s por intercambio esperado, con un piso de 3 min. Generoso, pero
+        # acotado: ningún run queda colgado para siempre.
+        timeout_s = max(180, max_turnos * 45)
 
     def worker():
         # Loop propio (en vez de asyncio.run) para poder drenar async-gens y darle
@@ -279,9 +300,45 @@ def run_stream(url, tarea, contexto=None, api_key=None, modelo=None,
         # evita el ruido "Event loop is closed" del cierre del CLI `claude`.
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        async def _runner():
+            # _amain como tarea cancelable. Un watchdog la cancela si el usuario
+            # frena el run (cancel.is_set()) o si se supera el deadline. La
+            # CancelledError entra por el await pendiente de _amain y dispara su
+            # finally (aclose del query + proxy.stop), cerrando todo en orden.
+            main = asyncio.ensure_future(
+                _amain(q, url, tarea, contexto or [], modelo,
+                       max_turnos, headless, selectors or {}))
+
+            async def _watchdog():
+                deadline = time.monotonic() + timeout_s
+                while not main.done():
+                    if cancel is not None and cancel.is_set():
+                        q.put({"tipo": "info", "texto": "Cancelando el run…"})
+                        main.cancel()
+                        return
+                    if time.monotonic() >= deadline:
+                        q.put({"tipo": "error",
+                               "texto": f"Timeout: el run superó {int(timeout_s)}s "
+                                        "sin terminar y se cortó automáticamente."})
+                        main.cancel()
+                        return
+                    await asyncio.sleep(0.5)
+
+            wd = asyncio.ensure_future(_watchdog())
+            try:
+                await main
+            except asyncio.CancelledError:
+                pass
+            finally:
+                wd.cancel()
+                try:
+                    await wd
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
         try:
-            loop.run_until_complete(_amain(q, url, tarea, contexto or [], modelo,
-                                           max_turnos, headless, selectors or {}))
+            loop.run_until_complete(_runner())
         except Exception as e:  # noqa: BLE001
             q.put({"tipo": "error", "texto": f"Error en el motor SDK: {e}"})
         finally:

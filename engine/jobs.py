@@ -16,6 +16,7 @@ un solo usuario).
 
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 import uuid
@@ -71,7 +72,20 @@ def lanzar(runner, params, meta, on_done=None):
 
     def worker():
         estado, error = "terminado", None
-        gen = runner(**params)
+        # Si el runner sabe escuchar una señal de cancelación, le pasamos el Event
+        # del job. Así la cancelación llega DENTRO del motor (clave para el SDK, que
+        # corre el agente en su propio thread/loop y no ve el chequeo cooperativo de
+        # abajo). Los runners que no la aceptan siguen funcionando igual.
+        call_params = dict(params)
+        try:
+            sig = inspect.signature(runner)
+            acepta_cancel = "cancel" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if acepta_cancel:
+                call_params["cancel"] = job.cancel
+        except (ValueError, TypeError):
+            pass
+        gen = runner(**call_params)
         try:
             for ev in gen:
                 if job.cancel.is_set():
