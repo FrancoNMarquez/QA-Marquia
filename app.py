@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from streamlit_option_menu import option_menu
 
@@ -464,15 +465,34 @@ def _lang_de(nombre):
     return {"json": "json", "py": "python", "txt": None}.get(ext)
 
 
+def boton_copiar_texto(texto):
+    """Botón HTML que copia `texto` en texto plano al portapapeles. Usa
+    navigator.clipboard (contexto seguro: la app corre en localhost) y el click
+    ocurre dentro del iframe del componente, así cuenta como gesto del usuario."""
+    payload = json.dumps(texto).replace("</", "<\\/")   # evita romper el </script>
+    components.html(f"""
+      <button id="cp" style="font:inherit;cursor:pointer;border:1px solid #3a4258;
+        background:#1b2030;color:#e6e8ef;border-radius:8px;
+        padding:.35rem .75rem">📋 Copiar texto plano</button>
+      <script>
+        const b = document.getElementById('cp');
+        b.onclick = () => navigator.clipboard.writeText({payload})
+          .then(() => {{ b.innerText = '✓ Copiado'; setTimeout(() => b.innerText='📋 Copiar texto plano', 1500); }})
+          .catch(() => {{ b.innerText = '⚠️ No se pudo copiar'; }});
+      </script>
+    """, height=46)
+
+
 @st.dialog("👀 Ver archivo", width="large")
 def ver_archivo_modal(nombre, contenido):
-    """Modal para leer un archivo de texto sin descargarlo. Adentro: guardar en una
-    carpeta elegida con el diálogo nativo, o descarga rápida del navegador."""
+    """Modal para leer un archivo de texto sin descargarlo. Adentro: copiar en texto
+    plano, guardar en una carpeta elegida con el diálogo nativo, o descarga rápida."""
     st.markdown(f"**{nombre}**")
     if nombre.lower().endswith(".md"):
         st.markdown(contenido)                      # reporte/transcript renderizados
     else:
         st.code(contenido, language=_lang_de(nombre))   # copiable
+    boton_copiar_texto(contenido)
     st.divider()
     c1, c2 = st.columns(2)
     if c1.button("📂 Elegir carpeta y guardar", use_container_width=True,
