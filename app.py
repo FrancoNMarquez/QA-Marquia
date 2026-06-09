@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -442,43 +443,50 @@ def render_uso(uso):
         st.progress(min(max(pct / 100, 0.0), 1.0))
 
 
-def render_resultados(run):
-    """Muestra reporte + transcript + descargas desde un dict de run guardado."""
-    rep = run.get("reporte") or {}
-    iconos = {"aprobado": "✅", "aprobado_con_observaciones": "⚠️", "rechazado": "❌"}
-    if rep:
-        st.subheader(f"{iconos.get(rep.get('veredicto'), '•')} Veredicto: "
-                     f"{rep.get('veredicto', '—').replace('_', ' ')}")
+def elegir_carpeta_nativa(titulo="Elegí la carpeta destino"):
+    """Abre el selector de carpetas nativo (zenity/GTK). Devuelve la ruta elegida o
+    None si se canceló o no hay zenity. Corre como subprocess para no chocar con el
+    event loop / hilo de Streamlit (como sí pasaría con tkinter)."""
+    try:
+        r = subprocess.run(
+            ["zenity", "--file-selection", "--directory", f"--title={titulo}"],
+            capture_output=True, text=True, timeout=180)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip() or None
 
-    archivos = run.get("archivos") or {}
-    if archivos:
-        st.markdown("#### 📁 Archivos retornados")
-        cols = st.columns(min(len(archivos), 4))
-        for i, (nombre, contenido) in enumerate(archivos.items()):
-            with cols[i % len(cols)]:
-                st.download_button(f"⬇️ {nombre}", data=contenido, file_name=nombre,
-                                   key=f"dl-{run.get('dir','')}-{nombre}")
-        # Vista del reporte si existe.
-        if "report.md" in archivos:
-            with st.expander("👀 Ver reporte", expanded=True):
-                st.markdown(archivos["report.md"])
-        for nombre, contenido in archivos.items():
-            if nombre in ("report.md", "transcript.md"):
-                continue
-            with st.expander(f"👀 Ver {nombre}"):
-                st.code(contenido)
 
-    uso = run.get("uso")
-    if uso:
-        render_uso(uso)
+def _lang_de(nombre):
+    """Lenguaje para st.code según la extensión (None = texto plano)."""
+    ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+    return {"json": "json", "py": "python", "txt": None}.get(ext)
 
-    if run.get("transcript"):
-        with st.expander("💬 Ver transcript completo"):
-            for rol, texto in run["transcript"]:
-                etiqueta = {"tester": "🧪 QA", "agente": "🤖 Webchat",
-                            "saludo": "🤖 Webchat", "pensamiento": "🧠",
-                            "info": "ℹ️", "error": "⛔"}.get(rol, rol)
-                st.markdown(f"**{etiqueta}:** {texto}")
+
+@st.dialog("👀 Ver archivo", width="large")
+def ver_archivo_modal(nombre, contenido):
+    """Modal para leer un archivo de texto sin descargarlo. Adentro: guardar en una
+    carpeta elegida con el diálogo nativo, o descarga rápida del navegador."""
+    st.markdown(f"**{nombre}**")
+    if nombre.lower().endswith(".md"):
+        st.markdown(contenido)                      # reporte/transcript renderizados
+    else:
+        st.code(contenido, language=_lang_de(nombre))   # copiable
+    st.divider()
+    c1, c2 = st.columns(2)
+    if c1.button("📂 Elegir carpeta y guardar", use_container_width=True,
+                 key=f"save-{nombre}"):
+        carpeta = elegir_carpeta_nativa(f"Guardar {nombre} en…")
+        if carpeta:
+            destino = Path(carpeta) / nombre
+            destino.write_text(contenido, encoding="utf-8")
+            st.success(f"Guardado en {destino}")
+        else:
+            st.info("Descarga cancelada.")
+    c2.download_button("⬇️ Descarga rápida (navegador)", data=contenido,
+                       file_name=nombre, use_container_width=True,
+                       key=f"dlq-{nombre}")
 
 
 def render_job(s):
@@ -528,11 +536,11 @@ def render_job(s):
                 render_uso(uso)
             archivos = (s.get("saved") or {}).get("archivos") or s.get("archivos") or {}
             if archivos:
-                cols = st.columns(min(len(archivos), 4))
-                for i, (nombre, contenido) in enumerate(archivos.items()):
-                    with cols[i % len(cols)]:
-                        st.download_button(f"⬇️ {nombre}", data=contenido, file_name=nombre,
-                                           key=f"job-dl-{s['id']}-{nombre}")
+                st.markdown("**📁 Archivos retornados**")
+                for nombre, contenido in archivos.items():
+                    if st.button(f"👀 Ver {nombre}", key=f"ver-job-{s['id']}-{nombre}",
+                                 use_container_width=True):
+                        ver_archivo_modal(nombre, contenido)
             st.caption("Detalle completo en la sección 🗂️ Runs anteriores.")
 
 
@@ -947,11 +955,8 @@ elif seccion == "Runs anteriores":
             st.write(f"**Modelo:** {meta.get('modelo', '—')}")
             if meta.get("uso"):
                 render_uso(meta["uso"])
-            for p in d.iterdir():
+            for p in sorted(d.iterdir()):
                 if p.is_file() and p.name != "inputs.json":
-                    st.download_button(f"⬇️ {p.name}", data=p.read_text(encoding="utf-8"),
-                                       file_name=p.name, key=f"hist-{d.name}-{p.name}")
-            report_f = d / "report.md"
-            if report_f.exists():
-                with st.expander("👀 Ver reporte"):
-                    st.markdown(report_f.read_text(encoding="utf-8"))
+                    if st.button(f"👀 Ver {p.name}", key=f"ver-{d.name}-{p.name}",
+                                 use_container_width=True):
+                        ver_archivo_modal(p.name, p.read_text(encoding="utf-8"))
