@@ -849,6 +849,10 @@ elif seccion == "Mejorar prompt":
     up_prompts = st.file_uploader("Arrastrá los .md / .txt de los prompts",
                                   accept_multiple_files=True, type=["md", "txt"],
                                   key=f"fix-prompts-{empresa}-{fnonce}")
+    prompt_pegado = st.text_area(
+        "…o pegá el prompt directamente acá (opcional)",
+        key=f"fix-pegado-{empresa}-{fnonce}", height=160,
+        placeholder="Pegá el texto del prompt actual…")
     carpeta_origen = st.text_input(
         "…o pegá la ruta de una carpeta local con .md (opcional)",
         key=f"fix-origen-{empresa}-{fnonce}",
@@ -877,6 +881,9 @@ elif seccion == "Mejorar prompt":
 
     # ---- resolver entradas ----
     prompts_fix = leer_uploads(up_prompts, None)
+    if prompt_pegado.strip():
+        prompts_fix = prompts_fix + [{"nombre": "prompt_pegado.md",
+                                      "contenido": prompt_pegado}]
     if not prompts_fix and carpeta_origen.strip():
         prompts_fix = leer_md_carpeta(carpeta_origen)
         if not prompts_fix:
@@ -903,7 +910,8 @@ elif seccion == "Mejorar prompt":
         if not es_sdk and not api_key:
             st.error("Falta la API key (cargala en la barra lateral) o cambiá a Claude Code.")
         elif not prompts_fix:
-            st.error("Subí al menos un prompt (o pegá una ruta de carpeta válida).")
+            st.error("Cargá al menos un prompt: subí un archivo, pegá el texto o una ruta "
+                     "de carpeta válida.")
         elif not reporte_txt:
             st.error("Falta el reporte de QA (elegí un run anterior o subilo).")
         else:
